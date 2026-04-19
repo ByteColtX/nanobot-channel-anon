@@ -1,0 +1,19 @@
+[project]
+name = "nanobot-channel-anon"
+version = "0.1.0"
+description = "适用于 nanobot 的 Tencent QQ 聊天插件（napcat）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["nanobot-ai", "aiohttp"]
+
+
+
+[project.entry-points."nanobot.channels"]
+anon = "nanobot_channel_anon:AnonChannel"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nanobot_channel_anon"]
