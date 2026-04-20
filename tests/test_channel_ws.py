@@ -1,0 +1,924 @@
+"""Tests for the OneBot WebSocket channel transport."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+from typing import Any
+
+import aiohttp
+import pytest
+from aiohttp import web
+from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.queue import MessageBus
+
+import nanobot_channel_anon.channel as channel_module
+from nanobot_channel_anon.channel import AnonChannel
+from nanobot_channel_anon.onebot import BotStatus, OneBotAPIRequest, OneBotRawEvent
+
+
+class OneBotWebSocketServer:
+    """Tiny OneBot-compatible WebSocket server for transport tests."""
+
+    def __init__(
+        self,
+        *,
+        login_info_response: dict[str, Any] | None = None,
+        on_action: Any = None,
+    ) -> None:
+        """Initialize the in-process test server."""
+        self.login_info_response = login_info_response or {
+            "status": "ok",
+            "data": {"user_id": "42", "nickname": "anon-bot"},
+        }
+        self.on_action = on_action
+        self.connection_count = 0
+        self.headers: list[dict[str, str]] = []
+        self.actions: list[dict[str, Any]] = []
+        self.current_ws: web.WebSocketResponse | None = None
+        self._runner: web.AppRunner | None = None
+        self._site: web.TCPSite | None = None
+        self._app = web.Application()
+        self._app.router.add_get("/", self._handle_ws)
+
+    @property
+    def url(self) -> str:
+        """Return the test server WebSocket URL."""
+        assert self._site is not None
+        sockets = self._site._server.sockets  # type: ignore[union-attr]
+        port = sockets[0].getsockname()[1]
+        return f"ws://127.0.0.1:{port}/"
+
+    async def start(self) -> None:
+        """Start the test server."""
+        self._runner = web.AppRunner(self._app)
+        await self._runner.setup()
+        self._site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        await self._site.start()
+
+    async def close(self) -> None:
+        """Stop the test server."""
+        if self.current_ws is not None and not self.current_ws.closed:
+            await self.current_ws.close()
+        if self._runner is not None:
+            await self._runner.cleanup()
+            self._runner = None
+        self._site = None
+        self.current_ws = None
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        """Send a JSON event to the connected client."""
+        assert self.current_ws is not None
+        await self.current_ws.send_json(payload)
+
+    async def close_current_connection(self) -> None:
+        """Close the currently active WebSocket connection."""
+        if self.current_ws is not None:
+            await self.current_ws.close()
+
+    async def _handle_ws(self, request: web.Request) -> web.StreamResponse:
+        ws = web.WebSocketResponse(autoping=True)
+        await ws.prepare(request)
+        self.current_ws = ws
+        self.connection_count += 1
+        self.headers.append(dict(request.headers))
+
+        try:
+            async for message in ws:
+                if message.type is not aiohttp.WSMsgType.TEXT:
+                    continue
+                payload = json.loads(message.data)
+                await self._handle_action(payload, ws)
+        finally:
+            if self.current_ws is ws:
+                self.current_ws = None
+
+        return ws
+
+    async def _handle_action(
+        self,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        self.actions.append(payload)
+        if payload.get("action") == "get_login_info":
+            response = dict(self.login_info_response)
+            response["echo"] = payload["echo"]
+            await ws.send_json(response)
+        if self.on_action is not None:
+            await self.on_action(self, payload, ws)
+
+
+async def _wait_for(predicate: Any, timeout: float = 1.0) -> Any:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("condition was not met before timeout")
+        await asyncio.sleep(0.01)
+
+
+async def _stop_channel(
+    channel: AnonChannel,
+    task: asyncio.Task[None],
+    server: OneBotWebSocketServer,
+) -> None:
+    await channel.stop()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    await server.close()
+
+
+async def _consume_inbound(bus: MessageBus, timeout: float = 1.0) -> InboundMessage:
+    return await asyncio.wait_for(bus.consume_inbound(), timeout=timeout)
+
+
+async def _reply_to_send_action(
+    payload: dict[str, Any],
+    ws: web.WebSocketResponse,
+    *,
+    status: str = "ok",
+    retcode: int = 0,
+) -> None:
+    if payload.get("action") not in {"send_private_msg", "send_group_msg"}:
+        return
+    await ws.send_json(
+        {
+            "status": status,
+            "retcode": retcode,
+            "data": {"message_id": 9001},
+            "echo": payload["echo"],
+        }
+    )
+
+
+def _find_action(
+    server: OneBotWebSocketServer,
+    action_name: str,
+) -> dict[str, Any]:
+    return next(item for item in server.actions if item["action"] == action_name)
+
+
+def test_start_requires_url() -> None:
+    """start() should reject an empty WebSocket URL."""
+
+    async def case() -> None:
+        channel = AnonChannel({"ws_url": ""}, MessageBus())
+        with pytest.raises(ValueError, match="url"):
+            await channel.start()
+
+    asyncio.run(case())
+
+
+def test_start_connects_with_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The client should send Authorization when access_token is set."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "access_token": "secret-token",
+            },
+            MessageBus(),
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: server.connection_count >= 1)
+            assert server.headers[-1]["Authorization"] == "Bearer secret-token"
+            await _wait_for(lambda: channel._self_id == "42")
+        finally:
+            await _stop_channel(channel, task, server)
+        assert channel._ws is None
+        assert channel._session is None
+
+    asyncio.run(case())
+
+
+def test_stop_during_connect_does_not_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """stop() during connect should not log a connect failure warning."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    class SlowConnectChannel(AnonChannel):
+        async def _connect_ws(self) -> aiohttp.ClientWebSocketResponse:
+            await asyncio.sleep(0.2)
+            raise ConnectionError("Connector is closed.")
+
+    async def case() -> None:
+        messages: list[str] = []
+        sink_id = channel_module.logger.add(
+            lambda message: messages.append(str(message)),
+            level="DEBUG",
+            format="{level}|{message}",
+        )
+        channel = SlowConnectChannel({"ws_url": "ws://127.0.0.1:1/"}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await asyncio.sleep(0.05)
+            await channel.stop()
+            await task
+        finally:
+            channel_module.logger.remove(sink_id)
+
+        assert not any(
+            "WARNING|Anon WebSocket connect failed:" in msg for msg in messages
+        )
+
+    asyncio.run(case())
+
+
+def test_send_api_request_round_trips_by_echo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Echo should route the API response back to the waiting caller."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") == "custom_action":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "echo": payload["echo"],
+                    "data": {"value": payload["params"]["value"]},
+                }
+            )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            response = await channel._send_api_request(
+                "custom_action",
+                {"value": 7},
+                timeout=0.5,
+            )
+            assert isinstance(response.data, dict)
+            assert response.data["value"] == 7
+            assert channel._pending == {}
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_api_request_timeout_cleans_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timed-out API requests should leave no pending waiter behind."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            with pytest.raises(TimeoutError):
+                await channel._send_api_request("slow_action", {}, timeout=0.05)
+            assert channel._pending == {}
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_pending_request_fails_when_connection_drops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disconnecting the socket should fail in-flight API requests."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            request_task = asyncio.create_task(
+                channel._send_api_request("hang_forever", {}, timeout=1.0)
+            )
+            await _wait_for(lambda: bool(channel._pending))
+            await server.close_current_connection()
+            with pytest.raises(ConnectionError, match="WebSocket closed"):
+                await request_task
+            assert channel._pending == {}
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_pending_request_fails_when_channel_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stopping the channel should wake any in-flight API waiter."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            request_task = asyncio.create_task(
+                channel._send_api_request("hang_until_stop", {}, timeout=1.0)
+            )
+            await _wait_for(lambda: bool(channel._pending))
+            await channel.stop()
+            with pytest.raises(ConnectionError, match="Channel stopped"):
+                await request_task
+            await task
+            assert channel._pending == {}
+        finally:
+            await server.close()
+
+    asyncio.run(case())
+
+
+def test_stop_during_fetch_self_id_after_reader_exits_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stop() should not turn start() into await None during get_login_info."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    class ClosingLoginServer(OneBotWebSocketServer):
+        async def _handle_action(
+            self,
+            payload: dict[str, Any],
+            ws: web.WebSocketResponse,
+        ) -> None:
+            if payload.get("action") == "get_login_info":
+                await ws.close()
+                return
+            await super()._handle_action(payload, ws)
+
+    async def case() -> None:
+        messages: list[str] = []
+        sink_id = channel_module.logger.add(
+            lambda message: messages.append(str(message)),
+            level="DEBUG",
+            format="{level}|{message}",
+        )
+        server = ClosingLoginServer()
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(
+                lambda: channel._reader_task is not None
+                and channel._reader_task.done()
+                and bool(channel._pending)
+            )
+            await channel.stop()
+            await task
+            assert channel._pending == {}
+        finally:
+            channel_module.logger.remove(sink_id)
+            await server.close()
+
+        assert not any("WARNING|Anon get_login_info failed:" in msg for msg in messages)
+
+    asyncio.run(case())
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_id"),
+    [
+        ({"status": "ok", "data": {"user_id": "101", "nickname": "wrapped"}}, "101"),
+        ({"status": "ok", "user_id": 202, "nickname": "flat"}, "202"),
+    ],
+)
+def test_fetch_self_id_supports_wrapped_and_flat_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+    response: dict[str, Any],
+    expected_id: str,
+) -> None:
+    """get_login_info parsing should accept both common response shapes."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(login_info_response=response)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == expected_id)
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_reader_publishes_private_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A triggered private message should be published to the inbound bus."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": "123",
+                    "raw_message": "hello",
+                }
+            )
+            inbound = await _consume_inbound(bus)
+            assert inbound.sender_id == "123"
+            assert inbound.chat_id == "private:123"
+            assert inbound.content == "hello"
+            assert inbound.metadata["trigger_reason"] == "private_prob"
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_reader_keeps_forward_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forward segments should stay as placeholders in the inbound path."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "text", "data": {"text": "看看"}},
+                        {"type": "forward", "data": {"id": "fwd-1"}},
+                    ],
+                }
+            )
+            inbound = await _consume_inbound(bus)
+            assert inbound.content == "看看[forward]"
+            assert inbound.metadata["forward_refs"][0]["forward_id"] == "fwd-1"
+            assert "forward_text" not in inbound.metadata
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_channel_reconnects_after_disconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dropped socket should trigger the reconnect loop."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    close_once: dict[str, Any] = {"done": False, "task": None}
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del payload
+        if server.connection_count == 1 and not close_once["done"]:
+            close_once["done"] = True
+
+            async def close_soon() -> None:
+                await asyncio.sleep(0.05)
+                await ws.close()
+
+            close_once["task"] = asyncio.create_task(close_soon())
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: server.connection_count >= 2, timeout=1.5)
+        finally:
+            await _stop_channel(channel, task, server)
+            close_task = close_once.get("task")
+            if close_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await close_task
+
+    asyncio.run(case())
+
+
+def test_send_routes_private_text_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Private chat IDs should map to send_private_msg."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(channel="anon", chat_id="private:1", content="hello")
+            )
+            action = _find_action(server, "send_private_msg")
+            assert action["params"] == {
+                "user_id": 1,
+                "message": [{"type": "text", "data": {"text": "hello"}}],
+            }
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_routes_group_text_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Group chat IDs should map to send_group_msg."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(channel="anon", chat_id="group:2", content="hello")
+            )
+            action = _find_action(server, "send_group_msg")
+            assert action["params"] == {
+                "group_id": 2,
+                "message": [{"type": "text", "data": {"text": "hello"}}],
+            }
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_rejects_bare_chat_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bare chat IDs should be rejected."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            with pytest.raises(ValueError, match="group:<id> or private:<id>"):
+                await channel.send(
+                    OutboundMessage(channel="anon", chat_id="3", content="hello")
+                )
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_ignores_explicit_reply_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outbound send should not emit reply segments."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(
+                    channel="anon",
+                    chat_id="private:1",
+                    content="hello",
+                    reply_to="99",
+                    metadata={"reply_to_message_id": "88"},
+                )
+            )
+            action = _find_action(server, "send_private_msg")
+            assert action["params"]["message"] == [
+                {"type": "text", "data": {"text": "hello"}},
+            ]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_does_not_reply_to_last_inbound_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inbound message IDs should not create implicit reply segments."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "777",
+                    "user_id": "123",
+                    "raw_message": "hello",
+                }
+            )
+            await _consume_inbound(bus)
+            await channel.send(
+                OutboundMessage(channel="anon", chat_id="private:123", content="reply")
+            )
+            action = _find_action(server, "send_private_msg")
+            assert action["params"]["message"] == [
+                {"type": "text", "data": {"text": "reply"}},
+            ]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_delta_sends_plain_text_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """send_delta() should fall back to a normal text send."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send_delta("private:1", "delta")
+            action = _find_action(server, "send_private_msg")
+            assert action["params"] == {
+                "user_id": 1,
+                "message": [{"type": "text", "data": {"text": "delta"}}],
+            }
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_routes_file_media_segments(monkeypatch: pytest.MonkeyPatch) -> None:
+    """file:// media refs should map to OneBot media segment types."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(
+                    channel="anon",
+                    chat_id="private:1",
+                    content="caption",
+                    media=[
+                        "file:///tmp/a.png",
+                        "file:///tmp/b.mp4",
+                        "file:///tmp/c.mp3",
+                        "file:///tmp/d.zip",
+                    ],
+                )
+            )
+            action = _find_action(server, "send_private_msg")
+            assert action["params"]["message"] == [
+                {"type": "image", "data": {"file": "file:///tmp/a.png"}},
+                {"type": "video", "data": {"file": "file:///tmp/b.mp4"}},
+                {"type": "record", "data": {"file": "file:///tmp/c.mp3"}},
+                {"type": "file", "data": {"file": "file:///tmp/d.zip"}},
+                {"type": "text", "data": {"text": "caption"}},
+            ]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_rejects_non_file_media_refs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only file:// media refs should be accepted."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            with pytest.raises(ValueError, match="file://"):
+                await channel.send(
+                    OutboundMessage(
+                        channel="anon",
+                        chat_id="private:1",
+                        content="hello",
+                        media=["https://example.com/a.png"],
+                    )
+                )
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_raises_on_failed_api_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failed OneBot responses should raise from send()."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws, status="failed", retcode=100)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            with pytest.raises(RuntimeError, match="retcode=100"):
+                await channel.send(
+                    OutboundMessage(
+                        channel="anon",
+                        chat_id="private:1",
+                        content="hello",
+                    )
+                )
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+@pytest.mark.parametrize("chat_id", ["", "group:", "foo:1", "private:abc"])
+def test_send_rejects_invalid_chat_id(chat_id: str) -> None:
+    """Invalid chat IDs should fail before sending."""
+
+    async def case() -> None:
+        channel = AnonChannel({"ws_url": "ws://127.0.0.1:1/"}, MessageBus())
+        with pytest.raises(ValueError):
+            await channel.send(
+                OutboundMessage(channel="anon", chat_id=chat_id, content="hello")
+            )
+
+    asyncio.run(case())
+
+
+def test_onebot_raw_event_parses_message_payload() -> None:
+    """The minimal OneBot event model should parse common message fields."""
+    payload = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "message_id": 1,
+            "user_id": "123",
+            "raw_message": "hello",
+            "message": [{"type": "text", "data": {"text": "hello"}}],
+            "sender": {"user_id": 123, "nickname": "tester", "card": ""},
+        }
+    )
+
+    assert payload.post_type == "message"
+    assert payload.message_type == "private"
+    assert payload.user_id == "123"
+    assert payload.sender is not None
+    assert payload.sender.nickname == "tester"
+    assert isinstance(payload.message, list)
+    assert payload.message[0].type == "text"
+    assert payload.message[0].data == {"text": "hello"}
+
+
+def test_onebot_api_request_omits_empty_echo() -> None:
+    """The minimal OneBot action model should keep echo optional."""
+    request = OneBotAPIRequest(action="send_msg", params={"message": "hello"})
+
+    assert request.model_dump(exclude_none=True) == {
+        "action": "send_msg",
+        "params": {"message": "hello"},
+    }
+
+
+def test_onebot_raw_event_accepts_status_object() -> None:
+    """The minimal OneBot event model should parse structured bot status."""
+    payload = OneBotRawEvent.model_validate(
+        {
+            "status": {"online": True, "good": True},
+            "data": {"user_id": 42},
+        }
+    )
+
+    assert payload.status == BotStatus(online=True, good=True)
+    assert payload.data == {"user_id": 42}
+
+
+def test_channel_decode_payload_returns_onebot_model() -> None:
+    """Channel payload decoding should return the typed OneBot model."""
+    payload = AnonChannel._decode_payload(
+        '{"post_type":"message","message_type":"private","user_id":"123"}'
+    )
+
+    assert isinstance(payload, OneBotRawEvent)
+    assert payload.post_type == "message"
+    assert payload.user_id == "123"
