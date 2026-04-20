@@ -990,6 +990,52 @@ def test_group_reply_to_non_bot_message_does_not_trigger(
             )
             with pytest.raises(asyncio.TimeoutError):
                 await _consume_inbound(bus, timeout=0.2)
+            buffered = channel._buffer.get("group:2", "9101")
+            assert buffered is not None
+            assert buffered.is_from_self is False
+            assert buffered.content == "收到"
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_allowlisted_inbound_is_cached_without_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allowlisted inbound messages should be buffered even when routing drops them."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 0.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9102",
+                    "user_id": "123",
+                    "raw_message": "hello",
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            buffered = channel._buffer.get("private:123", "9102")
+            assert buffered is not None
+            assert buffered.is_from_self is False
+            assert buffered.content == "hello"
         finally:
             await _stop_channel(channel, task, server)
 

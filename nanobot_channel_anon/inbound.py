@@ -158,14 +158,14 @@ class InboundProcessingResult:
     expanded_forwards: list[ForwardEntry] = field(default_factory=list)
 
 
-def prepare_inbound_candidate(
+def cache_inbound_candidate(
     candidate: InboundCandidate,
     *,
     buffer: Buffer,
-) -> InboundCandidate:
-    """补充路由前需要的上下文字段."""
-    _set_reply_target_from_self(candidate, buffer)
-    return candidate
+    expanded_forwards: list[ForwardEntry] | None = None,
+) -> None:
+    """将允许的入站消息写入最近消息缓存."""
+    _buffer_inbound_message(buffer, candidate, expanded_forwards or [])
 
 
 async def process_inbound_candidate(
@@ -174,13 +174,12 @@ async def process_inbound_candidate(
     buffer: Buffer,
     forward_resolver: ForwardResolver,
 ) -> InboundProcessingResult:
-    """补充 forward 语义并写入最近消息上下文."""
+    """补充 forward 语义, 供调用方写入最近消息缓存."""
     _set_reply_target_from_self(candidate, buffer)
     expanded_forwards = await _expand_candidate_forwards(candidate, forward_resolver)
     candidate.metadata["expanded_forwards"] = [
         _forward_entry_metadata(item) for item in expanded_forwards
     ]
-    _buffer_inbound_message(buffer, candidate, expanded_forwards)
     return InboundProcessingResult(
         candidate=candidate,
         expanded_forwards=expanded_forwards,

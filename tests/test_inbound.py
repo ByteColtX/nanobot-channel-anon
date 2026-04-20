@@ -5,8 +5,8 @@ import asyncio
 from nanobot_channel_anon.buffer import Buffer, MessageEntry
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.inbound import (
+    cache_inbound_candidate,
     normalize_inbound_event,
-    prepare_inbound_candidate,
     process_inbound_candidate,
 )
 from nanobot_channel_anon.onebot import OneBotRawEvent
@@ -165,9 +165,9 @@ def test_normalize_forward_segment_collects_forward_refs() -> None:
     assert candidate.metadata["forward_refs"][0]["summary"] == "聊天记录"
 
 
-def test_prepare_inbound_candidate_marks_reply_to_self() -> None:
-    """Inbound preparation should mark replies that target buffered self messages."""
-    raw = OneBotRawEvent.model_validate(
+def test_process_inbound_candidate_marks_reply_to_self_and_expands_forward() -> None:
+    """Inbound processing should mark replies and expand forwards."""
+    reply_raw = OneBotRawEvent.model_validate(
         {
             "post_type": "message",
             "message_type": "group",
@@ -180,12 +180,12 @@ def test_prepare_inbound_candidate_marks_reply_to_self() -> None:
             ],
         }
     )
-    candidate = normalize_inbound_event(
-        raw,
+    reply_candidate = normalize_inbound_event(
+        reply_raw,
         config=AnonConfig(max_text_length=200),
         self_id="42",
     )
-    assert candidate is not None
+    assert reply_candidate is not None
 
     buffer = Buffer(max_messages=10)
     buffer.add(
@@ -199,14 +199,24 @@ def test_prepare_inbound_candidate_marks_reply_to_self() -> None:
         )
     )
 
-    prepared = prepare_inbound_candidate(candidate, buffer=buffer)
+    async def _resolve_empty_forward(_forward_id: str) -> object:
+        return {"messages": []}
 
-    assert prepared.reply_target_from_self is True
-    assert prepared.metadata["reply_target_from_self"] is True
+    processed_reply = asyncio.run(
+        process_inbound_candidate(
+            reply_candidate,
+            buffer=buffer,
+            forward_resolver=_resolve_empty_forward,
+        )
+    )
+
+    assert processed_reply.candidate.reply_target_from_self is True
+    assert processed_reply.candidate.metadata["reply_target_from_self"] is True
 
 
-def test_process_inbound_candidate_expands_forward_and_buffers_message() -> None:
-    """Inbound processing should expand forwards and buffer the normalized entry."""
+
+def test_process_inbound_candidate_expands_forward_and_cache_writes_message() -> None:
+    """Inbound processing should expand forwards and let cache write the entry."""
     raw = OneBotRawEvent.model_validate(
         {
             "post_type": "message",
@@ -252,6 +262,11 @@ def test_process_inbound_candidate_expands_forward_and_buffers_message() -> None
     assert (
         processed.candidate.metadata["expanded_forwards"][0]["nodes"][0]["content"]
         == "forwarded"
+    )
+    cache_inbound_candidate(
+        processed.candidate,
+        buffer=buffer,
+        expanded_forwards=processed.expanded_forwards,
     )
     buffered = buffer.get("private:123", "700")
     assert buffered is not None

@@ -17,8 +17,8 @@ from pydantic import ValidationError
 from nanobot_channel_anon.buffer import Buffer, MessageEntry
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.inbound import (
+    cache_inbound_candidate,
     normalize_inbound_event,
-    prepare_inbound_candidate,
     process_inbound_candidate,
 )
 from nanobot_channel_anon.onebot import BotStatus, OneBotAPIRequest, OneBotRawEvent
@@ -327,7 +327,21 @@ class AnonChannel(BaseChannel):
             )
             return
 
-        candidate = prepare_inbound_candidate(candidate, buffer=self._buffer)
+        try:
+            processed = await process_inbound_candidate(
+                candidate,
+                buffer=self._buffer,
+                forward_resolver=self._resolve_forward_content,
+            )
+        except Exception as exc:
+            logger.warning("Anon inbound processing failed: {}", exc)
+            return
+        candidate = processed.candidate
+        cache_inbound_candidate(
+            candidate,
+            buffer=self._buffer,
+            expanded_forwards=processed.expanded_forwards,
+        )
 
         routed = self._router.route(candidate)
         if routed is None:
@@ -337,17 +351,6 @@ class AnonChannel(BaseChannel):
                 candidate.chat_id,
             )
             return
-
-        try:
-            processed = await process_inbound_candidate(
-                routed,
-                buffer=self._buffer,
-                forward_resolver=self._resolve_forward_content,
-            )
-        except Exception as exc:
-            logger.warning("Anon inbound processing failed: {}", exc)
-            return
-        routed = processed.candidate
 
         await self._handle_message(
             sender_id=routed.sender_id,
