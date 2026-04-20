@@ -1,7 +1,14 @@
 """Tests for OneBot inbound normalization."""
 
+import asyncio
+
+from nanobot_channel_anon.buffer import Buffer, MessageEntry
 from nanobot_channel_anon.config import AnonConfig
-from nanobot_channel_anon.inbound import normalize_inbound_event
+from nanobot_channel_anon.inbound import (
+    normalize_inbound_event,
+    prepare_inbound_candidate,
+    process_inbound_candidate,
+)
 from nanobot_channel_anon.onebot import OneBotRawEvent
 
 
@@ -156,6 +163,99 @@ def test_normalize_forward_segment_collects_forward_refs() -> None:
     assert len(candidate.forward_refs) == 1
     assert candidate.forward_refs[0].forward_id == "fwd-1"
     assert candidate.metadata["forward_refs"][0]["summary"] == "聊天记录"
+
+
+def test_prepare_inbound_candidate_marks_reply_to_self() -> None:
+    """Inbound preparation should mark replies that target buffered self messages."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": "456",
+            "user_id": "123",
+            "message_id": "9100",
+            "message": [
+                {"type": "reply", "data": {"id": "9013"}},
+                {"type": "text", "data": {"text": "收到"}},
+            ],
+        }
+    )
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+    assert candidate is not None
+
+    buffer = Buffer(max_messages=10)
+    buffer.add(
+        MessageEntry(
+            message_id="9013",
+            chat_id="group:456",
+            sender_id="42",
+            sender_name="42",
+            is_from_self=True,
+            content="hello",
+        )
+    )
+
+    prepared = prepare_inbound_candidate(candidate, buffer=buffer)
+
+    assert prepared.reply_target_from_self is True
+    assert prepared.metadata["reply_target_from_self"] is True
+
+
+def test_process_inbound_candidate_expands_forward_and_buffers_message() -> None:
+    """Inbound processing should expand forwards and buffer the normalized entry."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "message_id": "700",
+            "user_id": "123",
+            "message": [
+                {"type": "text", "data": {"text": "看看"}},
+                {"type": "forward", "data": {"id": "fwd-2", "summary": "聊天记录"}},
+            ],
+        }
+    )
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+    assert candidate is not None
+
+    buffer = Buffer(max_messages=10)
+
+    async def _resolve_forward(_forward_id: str) -> object:
+        return {
+            "messages": [
+                {
+                    "data": {
+                        "user_id": "8",
+                        "nickname": "Bob",
+                        "content": [{"type": "text", "data": {"text": "forwarded"}}],
+                    }
+                }
+            ]
+        }
+
+    processed = asyncio.run(
+        process_inbound_candidate(
+            candidate,
+            buffer=buffer,
+            forward_resolver=_resolve_forward,
+        )
+    )
+
+    assert (
+        processed.candidate.metadata["expanded_forwards"][0]["nodes"][0]["content"]
+        == "forwarded"
+    )
+    buffered = buffer.get("private:123", "700")
+    assert buffered is not None
+    assert buffered.expanded_forwards[0].nodes[0].content == "forwarded"
 
 
 def test_normalize_unsupported_event_returns_none() -> None:

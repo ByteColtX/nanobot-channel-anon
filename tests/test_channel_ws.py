@@ -531,6 +531,45 @@ def test_reader_keeps_forward_placeholder(monkeypatch: pytest.MonkeyPatch) -> No
     asyncio.run(case())
 
 
+def test_reader_drops_disallowed_sender_before_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disallowed senders should be rejected before publish and buffering."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["999"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "7010",
+                    "user_id": "123",
+                    "raw_message": "hello",
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            assert channel._buffer.get("private:123", "7010") is None
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
 def test_reader_fetches_forward_content_by_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """Forward IDs should be expanded through get_forward_msg before buffering."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)

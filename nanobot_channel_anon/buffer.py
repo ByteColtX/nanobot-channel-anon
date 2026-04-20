@@ -75,6 +75,11 @@ class Buffer:
             return None
         return chat_entries.get(message_id)
 
+    def is_reply_to_self(self, chat_id: str, message_id: str | None) -> bool:
+        """Return whether a reply target points to a buffered self message."""
+        target = self.get(chat_id, message_id)
+        return target is not None and target.is_from_self
+
     def get_chat_entries(self, chat_id: str) -> list[MessageEntry]:
         """Return buffered messages for a chat in insertion order."""
         chat_entries = self._messages.get(chat_id)

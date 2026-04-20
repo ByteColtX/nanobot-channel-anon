@@ -15,6 +15,7 @@ def _candidate(
     mentioned_self: bool = False,
     mentioned_all: bool = False,
     reply_to_message_id: str | None = None,
+    reply_target_from_self: bool = False,
     metadata: dict[str, Any] | None = None,
 ) -> InboundCandidate:
     merged_metadata = {
@@ -34,6 +35,7 @@ def _candidate(
         mentioned_self=mentioned_self,
         mentioned_all=mentioned_all,
         reply_to_message_id=reply_to_message_id,
+        reply_target_from_self=reply_target_from_self,
         session_key=None,
     )
 
@@ -72,7 +74,7 @@ def test_route_group_message_uses_reply_trigger() -> None:
     routed = router.route(
         _candidate(
             reply_to_message_id="9",
-            metadata={"reply_target_from_self": True},
+            reply_target_from_self=True,
         )
     )
 
@@ -87,7 +89,7 @@ def test_route_group_message_does_not_trigger_on_non_self_reply() -> None:
     routed = router.route(
         _candidate(
             reply_to_message_id="9",
-            metadata={"reply_target_from_self": False},
+            reply_target_from_self=False,
         )
     )
 

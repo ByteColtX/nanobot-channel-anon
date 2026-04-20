@@ -39,10 +39,7 @@ class InboundRouter:
             return self._with_trigger_reason(candidate, "keyword")
         if self.config.trigger_on_at and candidate.mentioned_self:
             return self._with_trigger_reason(candidate, "at")
-        if (
-            self.config.trigger_on_reply
-            and candidate.metadata.get("reply_target_from_self") is True
-        ):
+        if self.config.trigger_on_reply and candidate.reply_target_from_self:
             return self._with_trigger_reason(candidate, "reply")
         if not candidate.content:
             return None

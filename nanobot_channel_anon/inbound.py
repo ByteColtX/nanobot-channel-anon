@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from nanobot_channel_anon.buffer import (
+    Buffer,
+    ForwardEntry,
+    ForwardNodeEntry,
+    MessageEntry,
+)
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.onebot import OneBotMessageSegment, OneBotRawEvent
 from nanobot_channel_anon.utils import normalize_onebot_id, string_value
@@ -54,6 +61,7 @@ class InboundCandidate:
     mentioned_self: bool = False
     mentioned_all: bool = False
     reply_to_message_id: str | None = None
+    reply_target_from_self: bool = False
     forward_refs: list[ForwardRef] = field(default_factory=list)
     session_key: str | None = None
 
@@ -136,6 +144,265 @@ def _normalize_message_event(
         mentioned_all=parsed.mentioned_all,
         reply_to_message_id=parsed.reply_to_message_id,
         forward_refs=parsed.forward_refs,
+    )
+
+
+ForwardResolver = Callable[[str], Awaitable[Any]]
+
+
+@dataclass(slots=True)
+class InboundProcessingResult:
+    """入站候选事件增强后的结果."""
+
+    candidate: InboundCandidate
+    expanded_forwards: list[ForwardEntry] = field(default_factory=list)
+
+
+def prepare_inbound_candidate(
+    candidate: InboundCandidate,
+    *,
+    buffer: Buffer,
+) -> InboundCandidate:
+    """补充路由前需要的上下文字段."""
+    _set_reply_target_from_self(candidate, buffer)
+    return candidate
+
+
+async def process_inbound_candidate(
+    candidate: InboundCandidate,
+    *,
+    buffer: Buffer,
+    forward_resolver: ForwardResolver,
+) -> InboundProcessingResult:
+    """补充 forward 语义并写入最近消息上下文."""
+    _set_reply_target_from_self(candidate, buffer)
+    expanded_forwards = await _expand_candidate_forwards(candidate, forward_resolver)
+    candidate.metadata["expanded_forwards"] = [
+        _forward_entry_metadata(item) for item in expanded_forwards
+    ]
+    _buffer_inbound_message(buffer, candidate, expanded_forwards)
+    return InboundProcessingResult(
+        candidate=candidate,
+        expanded_forwards=expanded_forwards,
+    )
+
+
+async def _expand_candidate_forwards(
+    candidate: InboundCandidate,
+    forward_resolver: ForwardResolver,
+) -> list[ForwardEntry]:
+    expanded: list[ForwardEntry] = []
+    for ref in candidate.forward_refs:
+        if ref.embedded_nodes:
+            expanded.append(
+                _build_forward_entry(
+                    forward_id=ref.forward_id,
+                    summary=ref.summary,
+                    raw_nodes=ref.embedded_nodes,
+                )
+            )
+            continue
+
+        if not ref.forward_id:
+            expanded.append(
+                _build_forward_entry(
+                    forward_id=None,
+                    summary=ref.summary,
+                    raw_nodes=[],
+                    unresolved=True,
+                )
+            )
+            continue
+
+        try:
+            response_data = await forward_resolver(ref.forward_id)
+            raw_nodes = _extract_forward_nodes(response_data)
+            expanded.append(
+                _build_forward_entry(
+                    forward_id=ref.forward_id,
+                    summary=ref.summary,
+                    raw_nodes=raw_nodes,
+                    unresolved=not raw_nodes,
+                )
+            )
+        except Exception:
+            expanded.append(
+                _build_forward_entry(
+                    forward_id=ref.forward_id,
+                    summary=ref.summary,
+                    raw_nodes=[],
+                    unresolved=True,
+                )
+            )
+    return expanded
+
+
+def _set_reply_target_from_self(
+    candidate: InboundCandidate,
+    buffer: Buffer,
+) -> None:
+    candidate.reply_target_from_self = buffer.is_reply_to_self(
+        candidate.chat_id,
+        candidate.reply_to_message_id,
+    )
+    candidate.metadata["reply_target_from_self"] = candidate.reply_target_from_self
+
+
+def _buffer_inbound_message(
+    buffer: Buffer,
+    candidate: InboundCandidate,
+    expanded_forwards: list[ForwardEntry],
+) -> None:
+    message_id = _coerce_id(candidate.metadata.get("message_id"))
+    if message_id is None:
+        return
+    buffer.add(
+        MessageEntry(
+            message_id=message_id,
+            chat_id=candidate.chat_id,
+            sender_id=candidate.sender_id,
+            sender_name=(
+                str(candidate.metadata.get("sender_card") or "")
+                or str(candidate.metadata.get("sender_nickname") or "")
+                or candidate.sender_id
+            ),
+            is_from_self=False,
+            content=candidate.content,
+            media=list(candidate.media),
+            reply_to_message_id=candidate.reply_to_message_id,
+            event_time=candidate.metadata.get("event_time"),
+            segment_types=list(candidate.metadata.get("segment_types") or []),
+            forward_refs=list(candidate.metadata.get("forward_refs") or []),
+            expanded_forwards=expanded_forwards,
+            metadata=dict(candidate.metadata),
+        )
+    )
+
+
+def _forward_entry_metadata(entry: ForwardEntry) -> dict[str, Any]:
+    return {
+        "forward_id": entry.forward_id,
+        "summary": entry.summary,
+        "unresolved": entry.unresolved,
+        "nodes": [
+            {
+                "sender_id": node.sender_id,
+                "sender_name": node.sender_name,
+                "source_chat_id": node.source_chat_id,
+                "content": node.content,
+                "media": list(node.media),
+                "reply_to_message_id": node.reply_to_message_id,
+                "segment_types": list(node.segment_types),
+            }
+            for node in entry.nodes
+        ],
+    }
+
+
+def _extract_forward_nodes(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+
+    for key in ("messages", "message", "content"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+
+    return []
+
+
+def _build_forward_entry(
+    *,
+    forward_id: str | None,
+    summary: str | None,
+    raw_nodes: list[dict[str, Any]],
+    unresolved: bool = False,
+) -> ForwardEntry:
+    return ForwardEntry(
+        forward_id=forward_id,
+        summary=summary,
+        nodes=[_build_forward_node(node) for node in raw_nodes],
+        unresolved=unresolved,
+    )
+
+
+def _build_forward_node(node: dict[str, Any]) -> ForwardNodeEntry:
+    raw_data = node.get("data")
+    data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else node
+
+    sender = data.get("sender")
+    sender_id = normalize_onebot_id(
+        data.get("user_id") or data.get("uin") or _dict_get(sender, "user_id")
+    )
+    sender_name = (
+        string_value(data.get("nickname"))
+        or string_value(data.get("name"))
+        or string_value(_dict_get(sender, "nickname"))
+        or string_value(_dict_get(sender, "card"))
+        or sender_id
+        or ""
+    )
+    source_chat_id = _source_chat_id(data)
+
+    content_source = data.get("content")
+    if content_source is None:
+        content_source = data.get("message")
+
+    parsed = _parse_forward_message_segments(content_source)
+    content = parsed.text or string_value(data.get("raw_message")) or ""
+
+    return ForwardNodeEntry(
+        sender_id=sender_id,
+        sender_name=sender_name,
+        source_chat_id=source_chat_id,
+        content=content,
+        media=parsed.media,
+        reply_to_message_id=parsed.reply_to_message_id,
+        segment_types=parsed.segment_types,
+    )
+
+
+def _parse_forward_message_segments(message: Any) -> ParsedMessage:
+    text_parts: list[str] = []
+    media: list[str] = []
+    reply_to_message_id: str | None = None
+    segment_types: list[str] = []
+
+    for segment in _segments_from_message(message):
+        segment_types.append(segment.type)
+        data = segment.data
+
+        if segment.type == "text":
+            text_parts.append(string_value(data.get("text")) or "")
+            continue
+
+        if segment.type == "reply":
+            if reply_to_message_id is None:
+                reply_to_message_id = normalize_onebot_id(
+                    data.get("id") or data.get("message_id")
+                )
+            continue
+
+        if segment.type == "forward":
+            text_parts.append("[forward]")
+            continue
+
+        placeholder = _MEDIA_PLACEHOLDERS.get(segment.type)
+        if placeholder is None:
+            continue
+
+        media_ref = _first_media_ref(data)
+        if media_ref is not None:
+            media.append(media_ref)
+        text_parts.append(placeholder)
+
+    return ParsedMessage(
+        text="".join(text_parts).strip(),
+        media=media,
+        reply_to_message_id=reply_to_message_id,
+        segment_types=segment_types,
     )
 
 
@@ -301,6 +568,33 @@ def _list_value(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     return []
+
+
+def _coerce_id(value: Any) -> str | None:
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    return None
+
+
+def _source_chat_id(data: dict[str, Any]) -> str | None:
+    group_id = normalize_onebot_id(data.get("group_id"))
+    if group_id is not None:
+        return f"group:{group_id}"
+
+    source = string_value(data.get("source"))
+    if source is not None:
+        return source
+
+    return None
+
+
+def _dict_get(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(key)
+    return None
 
 
 def _build_private_chat_id(user_id: str) -> str:
