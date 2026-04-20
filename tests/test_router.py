@@ -66,13 +66,32 @@ def test_route_group_message_prefers_keyword() -> None:
 
 
 def test_route_group_message_uses_reply_trigger() -> None:
-    """Reply segments should trigger when enabled."""
+    """Reply trigger should require a buffered self-message match."""
     router = InboundRouter(AnonConfig(group_trigger_prob=0.0, trigger_on_reply=True))
 
-    routed = router.route(_candidate(reply_to_message_id="9"))
+    routed = router.route(
+        _candidate(
+            reply_to_message_id="9",
+            metadata={"reply_target_from_self": True},
+        )
+    )
 
     assert routed is not None
     assert routed.metadata["trigger_reason"] == "reply"
+
+
+def test_route_group_message_does_not_trigger_on_non_self_reply() -> None:
+    """Replys to non-bot messages should not trigger reply routing."""
+    router = InboundRouter(AnonConfig(group_trigger_prob=0.0, trigger_on_reply=True))
+
+    routed = router.route(
+        _candidate(
+            reply_to_message_id="9",
+            metadata={"reply_target_from_self": False},
+        )
+    )
+
+    assert routed is None
 
 
 def test_route_group_message_drops_without_trigger() -> None:

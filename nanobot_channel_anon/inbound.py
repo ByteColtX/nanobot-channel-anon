@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.onebot import OneBotMessageSegment, OneBotRawEvent
+from nanobot_channel_anon.utils import normalize_onebot_id, string_value
 
 EventKind = Literal["private_message", "group_message", "poke"]
 
@@ -64,7 +65,7 @@ def normalize_inbound_event(
     self_id: str | None,
 ) -> InboundCandidate | None:
     """把 OneBot 原始事件转换为可供路由判定的候选事件."""
-    effective_self_id = _normalize_id(raw.self_id) or self_id
+    effective_self_id = normalize_onebot_id(raw.self_id) or self_id
     if raw.post_type == "message":
         return _normalize_message_event(
             raw,
@@ -90,7 +91,7 @@ def _normalize_message_event(
     if sender_id is None:
         return None
 
-    group_id = _normalize_id(raw.group_id)
+    group_id = normalize_onebot_id(raw.group_id)
     if message_type == "group":
         if group_id is None:
             return None
@@ -109,7 +110,7 @@ def _normalize_message_event(
         "onebot_post_type": raw.post_type,
         "onebot_message_type": message_type,
         "onebot_sub_type": raw.sub_type,
-        "message_id": _normalize_id(raw.message_id),
+        "message_id": normalize_onebot_id(raw.message_id),
         "user_id": sender_id,
         "group_id": group_id,
         "self_id": self_id,
@@ -150,20 +151,20 @@ def _normalize_notice_event(
     if sender_id is None:
         return None
 
-    group_id = _normalize_id(raw.group_id)
+    group_id = normalize_onebot_id(raw.group_id)
     chat_id = (
         _build_group_chat_id(group_id)
         if group_id is not None
         else _build_private_chat_id(sender_id)
     )
 
-    target_id = _normalize_id(getattr(raw, "target_id", None))
+    target_id = normalize_onebot_id(getattr(raw, "target_id", None))
     metadata = {
         "event_kind": "poke",
         "onebot_post_type": raw.post_type,
         "onebot_notice_type": raw.notice_type,
         "onebot_sub_type": raw.sub_type,
-        "message_id": _normalize_id(raw.message_id),
+        "message_id": normalize_onebot_id(raw.message_id),
         "user_id": sender_id,
         "group_id": group_id,
         "target_id": target_id,
@@ -183,10 +184,10 @@ def _normalize_notice_event(
 
 def _normalize_sender_id(raw: OneBotRawEvent) -> str | None:
     if raw.sender is not None:
-        sender_id = _normalize_id(raw.sender.user_id)
+        sender_id = normalize_onebot_id(raw.sender.user_id)
         if sender_id is not None:
             return sender_id
-    return _normalize_id(raw.user_id)
+    return normalize_onebot_id(raw.user_id)
 
 
 def _segments_from_message(
@@ -224,11 +225,11 @@ def _parse_segments(
         data = segment.data
 
         if segment.type == "text":
-            text_parts.append(_string_value(data.get("text")) or "")
+            text_parts.append(string_value(data.get("text")) or "")
             continue
 
         if segment.type == "at":
-            target_id = _string_value(data.get("qq") or data.get("user_id"))
+            target_id = string_value(data.get("qq") or data.get("user_id"))
             if target_id == "all":
                 mentioned_all = True
             elif self_id is not None and target_id == self_id:
@@ -237,7 +238,7 @@ def _parse_segments(
 
         if segment.type == "reply":
             if reply_to_message_id is None:
-                reply_to_message_id = _normalize_id(
+                reply_to_message_id = normalize_onebot_id(
                     data.get("id") or data.get("message_id")
                 )
             continue
@@ -250,10 +251,10 @@ def _parse_segments(
             ]
             forward_refs.append(
                 ForwardRef(
-                    forward_id=_string_value(data.get("id")),
+                    forward_id=string_value(data.get("id")),
                     embedded_nodes=embedded_nodes,
-                    summary=_string_value(data.get("summary"))
-                    or _string_value(data.get("title")),
+                    summary=string_value(data.get("summary"))
+                    or string_value(data.get("title")),
                 )
             )
             text_parts.append("[forward]")
@@ -289,32 +290,11 @@ def _forward_ref_metadata(ref: ForwardRef) -> dict[str, Any]:
 
 def _first_media_ref(data: dict[str, Any]) -> str | None:
     for key in ("url", "file", "path", "file_id", "name"):
-        value = _string_value(data.get(key))
+        value = string_value(data.get(key))
         if value is not None:
             return value
     return None
 
-
-def _normalize_id(value: Any) -> str | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, str):
-        value = value.strip()
-        return value or None
-    return None
-
-
-def _string_value(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        value = value.strip()
-        return value or None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return str(value)
-    return None
 
 
 def _list_value(value: Any) -> list[Any]:

@@ -14,11 +14,13 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from pydantic import ValidationError
 
+from nanobot_channel_anon.buffer import Buffer, MessageEntry
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.inbound import normalize_inbound_event
 from nanobot_channel_anon.onebot import BotStatus, OneBotAPIRequest, OneBotRawEvent
 from nanobot_channel_anon.outbound import build_send_request
 from nanobot_channel_anon.router import InboundRouter
+from nanobot_channel_anon.utils import build_forward_entry, extract_forward_nodes
 
 _CONNECT_TIMEOUT_S = 10.0
 _PING_INTERVAL_S = 30.0
@@ -44,10 +46,12 @@ class AnonChannel(BaseChannel):
         self._stop_event: asyncio.Event | None = None
         self._reader_task: asyncio.Task[str] | None = None
         self._ping_task: asyncio.Task[None] | None = None
+        self._inbound_tasks: set[asyncio.Task[None]] = set()
         self._write_lock = asyncio.Lock()
         self._pending: dict[str, asyncio.Future[OneBotRawEvent]] = {}
         self._echo_counter = 0
         self._self_id: str | None = None
+        self._buffer = Buffer(self.config.max_context_messages)
         self._router = InboundRouter(self.config)
 
     @classmethod
@@ -124,6 +128,7 @@ class AnonChannel(BaseChannel):
             raise RuntimeError(
                 f"OneBot action {action} failed: retcode={response.retcode}"
             )
+        self._buffer_outbound_message(msg, response)
 
     async def send_delta(
         self,
@@ -187,7 +192,7 @@ class AnonChannel(BaseChannel):
                         payload.status,
                     )
                     continue
-                await self._handle_inbound_event(payload)
+                self._spawn_inbound_task(payload)
                 continue
 
             if message.type in {
@@ -310,6 +315,10 @@ class AnonChannel(BaseChannel):
             )
             return
 
+        candidate.metadata["reply_target_from_self"] = self._reply_targets_self(
+            candidate
+        )
+
         routed = self._router.route(candidate)
         if routed is None:
             logger.debug(
@@ -318,6 +327,13 @@ class AnonChannel(BaseChannel):
                 candidate.chat_id,
             )
             return
+
+        if self.is_allowed(routed.sender_id):
+            expanded_forwards = await self._expand_candidate_forwards(routed)
+            routed.metadata["expanded_forwards"] = [
+                self._forward_entry_metadata(item) for item in expanded_forwards
+            ]
+            self._buffer_inbound_message(routed, expanded_forwards)
 
         await self._handle_message(
             sender_id=routed.sender_id,
@@ -352,6 +368,19 @@ class AnonChannel(BaseChannel):
         if not self._should_stop():
             logger.info("Anon WebSocket disconnected: {}", reason)
 
+    def _spawn_inbound_task(self, payload: OneBotRawEvent) -> None:
+        task = asyncio.create_task(self._handle_inbound_event(payload))
+        self._inbound_tasks.add(task)
+        task.add_done_callback(self._on_inbound_task_done)
+
+    def _on_inbound_task_done(self, task: asyncio.Task[None]) -> None:
+        self._inbound_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("Anon inbound handling failed: {}", exc)
+
     async def _shutdown(self) -> None:
         self._fail_pending(ConnectionError("Channel stopped"))
 
@@ -366,6 +395,15 @@ class AnonChannel(BaseChannel):
             task = getattr(self, attr)
             setattr(self, attr, None)
             if task is None or task is current_task:
+                continue
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        inbound_tasks = list(self._inbound_tasks)
+        self._inbound_tasks.clear()
+        for task in inbound_tasks:
+            if task is current_task:
                 continue
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -443,6 +481,133 @@ class AnonChannel(BaseChannel):
         if isinstance(status, str):
             return status in {"ok", "failed"}
         return isinstance(status, BotStatus)
+
+    async def _expand_candidate_forwards(self, candidate: Any) -> list[Any]:
+        expanded = []
+        for ref in candidate.forward_refs:
+            if ref.embedded_nodes:
+                expanded.append(
+                    build_forward_entry(
+                        forward_id=ref.forward_id,
+                        summary=ref.summary,
+                        raw_nodes=ref.embedded_nodes,
+                    )
+                )
+                continue
+
+            if not ref.forward_id:
+                expanded.append(
+                    build_forward_entry(
+                        forward_id=None,
+                        summary=ref.summary,
+                        raw_nodes=[],
+                        unresolved=True,
+                    )
+                )
+                continue
+
+            try:
+                response = await self._send_api_request(
+                    "get_forward_msg", {"id": ref.forward_id}
+                )
+                raw_nodes = extract_forward_nodes(response.data)
+                expanded.append(
+                    build_forward_entry(
+                        forward_id=ref.forward_id,
+                        summary=ref.summary,
+                        raw_nodes=raw_nodes,
+                        unresolved=not raw_nodes,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Anon get_forward_msg failed: {}", exc)
+                expanded.append(
+                    build_forward_entry(
+                        forward_id=ref.forward_id,
+                        summary=ref.summary,
+                        raw_nodes=[],
+                        unresolved=True,
+                    )
+                )
+        return expanded
+
+    def _reply_targets_self(self, candidate: Any) -> bool:
+        target = self._buffer.get(candidate.chat_id, candidate.reply_to_message_id)
+        return target is not None and target.is_from_self
+
+    def _buffer_inbound_message(
+        self,
+        candidate: Any,
+        expanded_forwards: list[Any],
+    ) -> None:
+        message_id = self._coerce_id(candidate.metadata.get("message_id"))
+        if message_id is None:
+            return
+        self._buffer.add(
+            MessageEntry(
+                message_id=message_id,
+                chat_id=candidate.chat_id,
+                sender_id=candidate.sender_id,
+                sender_name=(
+                    str(candidate.metadata.get("sender_card") or "")
+                    or str(candidate.metadata.get("sender_nickname") or "")
+                    or candidate.sender_id
+                ),
+                is_from_self=False,
+                content=candidate.content,
+                media=list(candidate.media),
+                reply_to_message_id=candidate.reply_to_message_id,
+                event_time=candidate.metadata.get("event_time"),
+                segment_types=list(candidate.metadata.get("segment_types") or []),
+                forward_refs=list(candidate.metadata.get("forward_refs") or []),
+                expanded_forwards=expanded_forwards,
+                metadata=dict(candidate.metadata),
+            )
+        )
+
+    def _buffer_outbound_message(
+        self,
+        msg: OutboundMessage,
+        response: OneBotRawEvent,
+    ) -> None:
+        data = response.data if isinstance(response.data, dict) else {}
+        message_id = self._coerce_id(data.get("message_id"))
+        if message_id is None:
+            return
+        self._buffer.add(
+            MessageEntry(
+                message_id=message_id,
+                chat_id=msg.chat_id,
+                sender_id=self._self_id or "",
+                sender_name=self._self_id or "",
+                is_from_self=True,
+                content=msg.content,
+                media=list(msg.media),
+                reply_to_message_id=self._coerce_id(msg.metadata.get("reply_to_message_id")),
+                segment_types=["text"] if msg.content else [],
+                metadata=dict(msg.metadata),
+            )
+        )
+
+    @staticmethod
+    def _forward_entry_metadata(entry: Any) -> dict[str, Any]:
+        return {
+            "forward_id": entry.forward_id,
+            "summary": entry.summary,
+            "unresolved": entry.unresolved,
+            "nodes": [
+                {
+                    "sender_id": node.sender_id,
+                    "sender_name": node.sender_name,
+                    "source_chat_id": node.source_chat_id,
+                    "content": node.content,
+                    "media": list(node.media),
+                    "reply_to_message_id": node.reply_to_message_id,
+                    "segment_types": list(node.segment_types),
+                }
+                for node in entry.nodes
+            ],
+        }
 
     @staticmethod
     def _coerce_id(value: Any) -> str | None:

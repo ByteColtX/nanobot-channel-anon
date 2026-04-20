@@ -14,6 +14,7 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 
 import nanobot_channel_anon.channel as channel_module
+from nanobot_channel_anon.buffer import MessageEntry
 from nanobot_channel_anon.channel import AnonChannel
 from nanobot_channel_anon.onebot import BotStatus, OneBotAPIRequest, OneBotRawEvent
 
@@ -142,6 +143,7 @@ async def _reply_to_send_action(
     *,
     status: str = "ok",
     retcode: int = 0,
+    message_id: int = 9001,
 ) -> None:
     if payload.get("action") not in {"send_private_msg", "send_group_msg"}:
         return
@@ -149,7 +151,7 @@ async def _reply_to_send_action(
         {
             "status": status,
             "retcode": retcode,
-            "data": {"message_id": 9001},
+            "data": {"message_id": message_id},
             "echo": payload["echo"],
         }
     )
@@ -462,7 +464,7 @@ def test_reader_publishes_private_message(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_reader_keeps_forward_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Forward segments should stay as placeholders in the inbound path."""
+    """Forward segments should stay as placeholders in published content."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def case() -> None:
@@ -484,17 +486,118 @@ def test_reader_keeps_forward_placeholder(monkeypatch: pytest.MonkeyPatch) -> No
                 {
                     "post_type": "message",
                     "message_type": "private",
+                    "message_id": "700",
                     "user_id": "123",
                     "message": [
                         {"type": "text", "data": {"text": "看看"}},
-                        {"type": "forward", "data": {"id": "fwd-1"}},
+                        {
+                            "type": "forward",
+                            "data": {
+                                "id": "fwd-1",
+                                "summary": "聊天记录",
+                                "content": [
+                                    {
+                                        "type": "node",
+                                        "data": {
+                                            "user_id": "7",
+                                            "nickname": "Alice",
+                                            "content": [
+                                                {
+                                                    "type": "text",
+                                                    "data": {"text": "hello"},
+                                                }
+                                            ],
+                                        },
+                                    }
+                                ],
+                            },
+                        },
                     ],
                 }
             )
             inbound = await _consume_inbound(bus)
             assert inbound.content == "看看[forward]"
             assert inbound.metadata["forward_refs"][0]["forward_id"] == "fwd-1"
-            assert "forward_text" not in inbound.metadata
+            assert (
+                inbound.metadata["expanded_forwards"][0]["nodes"][0]["content"]
+                == "hello"
+            )
+            buffered = channel._buffer.get("private:123", "700")
+            assert buffered is not None
+            assert buffered.expanded_forwards[0].nodes[0].content == "hello"
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_reader_fetches_forward_content_by_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forward IDs should be expanded through get_forward_msg before buffering."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") != "get_forward_msg":
+            return
+        await ws.send_json(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "messages": [
+                        {
+                            "data": {
+                                "user_id": "8",
+                                "nickname": "Bob",
+                                "content": [
+                                    {"type": "text", "data": {"text": "forwarded"}}
+                                ],
+                            }
+                        }
+                    ]
+                },
+                "echo": payload["echo"],
+            }
+        )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "701",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "text", "data": {"text": "看看"}},
+                        {"type": "forward", "data": {"id": "fwd-2"}},
+                    ],
+                }
+            )
+            inbound = await _consume_inbound(bus)
+            assert inbound.content == "看看[forward]"
+            assert (
+                inbound.metadata["expanded_forwards"][0]["nodes"][0]["content"]
+                == "forwarded"
+            )
+            assert _find_action(server, "get_forward_msg")["params"] == {"id": "fwd-2"}
         finally:
             await _stop_channel(channel, task, server)
 
@@ -710,6 +813,144 @@ def test_send_does_not_reply_to_last_inbound_message(
             assert action["params"]["message"] == [
                 {"type": "text", "data": {"text": "reply"}},
             ]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_buffers_outbound_message_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Successful sends should buffer the outbound OneBot message ID."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws, message_id=9012)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(channel="anon", chat_id="group:2", content="hello")
+            )
+            buffered = channel._buffer.get("group:2", "9012")
+            assert buffered is not None
+            assert buffered.is_from_self is True
+            assert buffered.content == "hello"
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_group_reply_only_triggers_for_bot_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Group reply trigger should require replying to a buffered bot message."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws, message_id=9013)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "group_trigger_prob": 0.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(channel="anon", chat_id="group:2", content="hello")
+            )
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9100",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "reply", "data": {"id": "9013"}},
+                        {"type": "text", "data": {"text": "收到"}},
+                    ],
+                }
+            )
+            inbound = await _consume_inbound(bus)
+            assert inbound.metadata["trigger_reason"] == "reply"
+            assert inbound.metadata["reply_target_from_self"] is True
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_group_reply_to_non_bot_message_does_not_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Group reply should not trigger when replying to a non-bot buffered message."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "group_trigger_prob": 0.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            channel._buffer.add(
+                MessageEntry(
+                    message_id="555",
+                    chat_id="group:2",
+                    sender_id="999",
+                    sender_name="peer",
+                    is_from_self=False,
+                    content="peer msg",
+                )
+            )
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9101",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "reply", "data": {"id": "555"}},
+                        {"type": "text", "data": {"text": "收到"}},
+                    ],
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
         finally:
             await _stop_channel(channel, task, server)
 
