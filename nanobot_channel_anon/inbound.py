@@ -14,7 +14,12 @@ from nanobot_channel_anon.buffer import (
 )
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.onebot import OneBotMessageSegment, OneBotRawEvent
-from nanobot_channel_anon.utils import normalize_onebot_id, string_value
+from nanobot_channel_anon.utils import (
+    build_group_chat_id,
+    build_private_chat_id,
+    normalize_onebot_id,
+    string_value,
+)
 
 EventKind = Literal["private_message", "group_message", "poke"]
 
@@ -103,10 +108,10 @@ def _normalize_message_event(
     if message_type == "group":
         if group_id is None:
             return None
-        chat_id = _build_group_chat_id(group_id)
+        chat_id = build_group_chat_id(group_id)
         event_kind: EventKind = "group_message"
     else:
-        chat_id = _build_private_chat_id(sender_id)
+        chat_id = build_private_chat_id(sender_id)
         event_kind = "private_message"
 
     parsed = _parse_segments(_segments_from_message(raw.message), self_id=self_id)
@@ -252,7 +257,7 @@ def _buffer_inbound_message(
     candidate: InboundCandidate,
     expanded_forwards: list[ForwardEntry],
 ) -> None:
-    message_id = _coerce_id(candidate.metadata.get("message_id"))
+    message_id = normalize_onebot_id(candidate.metadata.get("message_id"))
     if message_id is None:
         return
     buffer.add(
@@ -419,9 +424,9 @@ def _normalize_notice_event(
 
     group_id = normalize_onebot_id(raw.group_id)
     chat_id = (
-        _build_group_chat_id(group_id)
+        build_group_chat_id(group_id)
         if group_id is not None
-        else _build_private_chat_id(sender_id)
+        else build_private_chat_id(sender_id)
     )
 
     target_id = normalize_onebot_id(getattr(raw, "target_id", None))
@@ -569,19 +574,10 @@ def _list_value(value: Any) -> list[Any]:
     return []
 
 
-def _coerce_id(value: Any) -> str | None:
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, str):
-        value = value.strip()
-        return value or None
-    return None
-
-
 def _source_chat_id(data: dict[str, Any]) -> str | None:
     group_id = normalize_onebot_id(data.get("group_id"))
     if group_id is not None:
-        return f"group:{group_id}"
+        return build_group_chat_id(group_id)
 
     source = string_value(data.get("source"))
     if source is not None:
@@ -596,9 +592,3 @@ def _dict_get(value: Any, key: str) -> Any:
     return None
 
 
-def _build_private_chat_id(user_id: str) -> str:
-    return f"private:{user_id}"
-
-
-def _build_group_chat_id(group_id: str) -> str:
-    return f"group:{group_id}"

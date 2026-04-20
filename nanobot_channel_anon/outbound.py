@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from nanobot_channel_anon.onebot import OneBotMessageSegment
+from nanobot_channel_anon.utils import parse_chat_id
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
@@ -21,7 +22,7 @@ def build_send_request(
     metadata: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Build the OneBot action and params for an outbound message."""
-    target_kind, target_id = _parse_chat_target(chat_id)
+    target_kind, target_id = parse_chat_id(chat_id)
     action = "send_group_msg" if target_kind == "group" else "send_private_msg"
     id_key = "group_id" if target_kind == "group" else "user_id"
     segments = build_message_segments(content, media=media or [], metadata=metadata)
@@ -55,31 +56,6 @@ def build_message_segments(
         segments.append(OneBotMessageSegment(type="text", data={"text": content}))
 
     return segments
-
-
-def _parse_chat_target(chat_id: str) -> tuple[str, int]:
-    normalized_chat_id = chat_id.strip()
-    if not normalized_chat_id:
-        raise ValueError("chat_id is required")
-
-    prefix, separator, raw_target_id = normalized_chat_id.partition(":")
-    if not separator:
-        raise ValueError("chat_id must use group:<id> or private:<id>")
-    if prefix not in {"group", "private"}:
-        raise ValueError(f"unsupported chat_id prefix: {prefix}")
-
-    target_id = _parse_target_id(raw_target_id)
-    return prefix, target_id
-
-
-def _parse_target_id(value: str) -> int:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError("chat_id target is required")
-    try:
-        return int(normalized_value)
-    except ValueError as exc:
-        raise ValueError(f"chat_id target must be numeric: {normalized_value}") from exc
 
 
 def _build_reply_placeholder_segments(

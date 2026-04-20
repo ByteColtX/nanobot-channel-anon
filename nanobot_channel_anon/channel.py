@@ -24,6 +24,7 @@ from nanobot_channel_anon.inbound import (
 from nanobot_channel_anon.onebot import BotStatus, OneBotAPIRequest, OneBotRawEvent
 from nanobot_channel_anon.outbound import build_send_request
 from nanobot_channel_anon.router import InboundRouter
+from nanobot_channel_anon.utils import normalize_onebot_id
 
 _CONNECT_TIMEOUT_S = 10.0
 _PING_INTERVAL_S = 30.0
@@ -284,7 +285,7 @@ class AnonChannel(BaseChannel):
         if not isinstance(info, dict):
             info = response.model_dump(exclude_none=True)
 
-        user_id = self._coerce_id(info.get("user_id"))
+        user_id = normalize_onebot_id(info.get("user_id"))
         if not user_id:
             logger.warning(
                 "Anon get_login_info missing user_id: {}",
@@ -516,7 +517,7 @@ class AnonChannel(BaseChannel):
         response: OneBotRawEvent,
     ) -> None:
         data = response.data if isinstance(response.data, dict) else {}
-        message_id = self._coerce_id(data.get("message_id"))
+        message_id = normalize_onebot_id(data.get("message_id"))
         if message_id is None:
             return
         self._buffer.add(
@@ -528,17 +529,11 @@ class AnonChannel(BaseChannel):
                 is_from_self=True,
                 content=msg.content,
                 media=list(msg.media),
-                reply_to_message_id=self._coerce_id(msg.metadata.get("reply_to_message_id")),
+                reply_to_message_id=normalize_onebot_id(
+                    msg.metadata.get("reply_to_message_id")
+                ),
                 segment_types=["text"] if msg.content else [],
                 metadata=dict(msg.metadata),
             )
         )
 
-    @staticmethod
-    def _coerce_id(value: Any) -> str | None:
-        if isinstance(value, int):
-            return str(value)
-        if isinstance(value, str):
-            value = value.strip()
-            return value or None
-        return None
