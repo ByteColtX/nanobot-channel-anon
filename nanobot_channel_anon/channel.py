@@ -8,12 +8,14 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.config.paths import get_media_dir
 from pydantic import ValidationError
 
 from nanobot_channel_anon.buffer import Buffer, MessageEntry
@@ -350,6 +352,7 @@ class AnonChannel(BaseChannel):
                 candidate,
                 buffer=self._buffer,
                 forward_resolver=self._resolve_forward_content,
+                image_downloader=self._download_inbound_image,
             )
         except Exception as exc:
             logger.warning("Anon inbound processing failed: {}", exc)
@@ -596,6 +599,44 @@ class AnonChannel(BaseChannel):
             )
             return None
         return response.data
+
+    async def _download_inbound_image(self, media_item: dict[str, Any]) -> str | None:
+        file_name = str(media_item.get("file") or "").strip()
+        url = str(media_item.get("url") or "").strip()
+        if not file_name or not url:
+            return None
+
+        target_name = Path(file_name).name.strip()
+        if not target_name:
+            return None
+
+        target_path = get_media_dir("anon") / target_name
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if target_path.exists():
+            return self._file_uri(target_path)
+
+        file_size_raw = str(media_item.get("file_size") or "").strip()
+        if not file_size_raw:
+            return None
+
+        try:
+            file_size = int(file_size_raw)
+        except ValueError:
+            return None
+
+        if file_size > self.config.media_max_size_mb * 1024 * 1024:
+            return None
+
+        session = self._require_session()
+        async with session.get(url) as response:
+            response.raise_for_status()
+            target_path.write_bytes(await response.read())
+        return self._file_uri(target_path)
+
+    @staticmethod
+    def _file_uri(path: Path) -> str:
+        resolved = path.resolve(strict=False)
+        return f"file://{quote(resolved.as_posix(), safe='/:.-_~')}"
 
     def _buffer_outbound_message(
         self,

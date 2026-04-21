@@ -46,6 +46,7 @@ class ParsedMessage:
 
     text: str = ""
     media: list[str] = field(default_factory=list)
+    media_items: list[dict[str, Any]] = field(default_factory=list)
     mentioned_self: bool = False
     mentioned_all: bool = False
     reply_to_message_id: str | None = None
@@ -132,6 +133,7 @@ def _normalize_message_event(
         "mentioned_self": parsed.mentioned_self,
         "mentioned_all": parsed.mentioned_all,
         "forward_refs": [_forward_ref_metadata(ref) for ref in parsed.forward_refs],
+        "media_items": list(parsed.media_items),
         "sender_nickname": raw.sender.nickname if raw.sender is not None else "",
         "sender_card": raw.sender.card if raw.sender is not None else "",
         "segment_types": parsed.segment_types,
@@ -142,7 +144,7 @@ def _normalize_message_event(
         sender_id=sender_id,
         chat_id=chat_id,
         content=content,
-        media=parsed.media,
+        media=[],
         metadata=metadata,
         event_kind=event_kind,
         mentioned_self=parsed.mentioned_self,
@@ -153,6 +155,7 @@ def _normalize_message_event(
 
 
 ForwardResolver = Callable[[str], Awaitable[Any]]
+ImageDownloader = Callable[[dict[str, Any]], Awaitable[str | None]]
 
 
 @dataclass(slots=True)
@@ -178,9 +181,11 @@ async def process_inbound_candidate(
     *,
     buffer: Buffer,
     forward_resolver: ForwardResolver,
+    image_downloader: ImageDownloader | None = None,
 ) -> InboundProcessingResult:
-    """补充 forward 语义, 供调用方写入最近消息缓存."""
+    """补充 forward 语义与图片本地化结果, 供调用方写入最近消息缓存."""
     _set_reply_target_from_self(candidate, buffer)
+    candidate.media = await _download_candidate_images(candidate, image_downloader)
     expanded_forwards = await _expand_candidate_forwards(candidate, forward_resolver)
     candidate.metadata["expanded_forwards"] = [
         _forward_entry_metadata(item) for item in expanded_forwards
@@ -189,6 +194,23 @@ async def process_inbound_candidate(
         candidate=candidate,
         expanded_forwards=expanded_forwards,
     )
+
+
+async def _download_candidate_images(
+    candidate: InboundCandidate,
+    image_downloader: ImageDownloader | None,
+) -> list[str]:
+    if image_downloader is None:
+        return []
+
+    media_refs: list[str] = []
+    for item in _list_value(candidate.metadata.get("media_items")):
+        if not isinstance(item, dict) or item.get("type") != "image":
+            continue
+        media_ref = await image_downloader(item)
+        if media_ref is not None:
+            media_refs.append(media_ref)
+    return media_refs
 
 
 async def _expand_candidate_forwards(
@@ -503,7 +525,7 @@ def _parse_segments(
     self_id: str | None,
 ) -> ParsedMessage:
     text_parts: list[str] = []
-    media: list[str] = []
+    media_items: list[dict[str, Any]] = []
     mentioned_self = False
     mentioned_all = False
     reply_to_message_id: str | None = None
@@ -554,14 +576,14 @@ def _parse_segments(
         if placeholder is None:
             continue
 
-        media_ref = _first_media_ref(data)
-        if media_ref is not None:
-            media.append(media_ref)
+        media_item = _build_media_item(segment.type, data)
+        if media_item is not None:
+            media_items.append(media_item)
         text_parts.append(placeholder)
 
     return ParsedMessage(
         text="".join(text_parts).strip(),
-        media=media,
+        media_items=media_items,
         mentioned_self=mentioned_self,
         mentioned_all=mentioned_all,
         reply_to_message_id=reply_to_message_id,
@@ -576,6 +598,15 @@ def _forward_ref_metadata(ref: ForwardRef) -> dict[str, Any]:
         "embedded_nodes": ref.embedded_nodes,
         "summary": ref.summary,
     }
+
+
+def _build_media_item(segment_type: str, data: dict[str, Any]) -> dict[str, Any] | None:
+    item = {"type": segment_type}
+    for key in ("file", "url", "file_size"):
+        value = string_value(data.get(key))
+        if value is not None:
+            item[key] = value
+    return item if len(item) > 1 else None
 
 
 def _first_media_ref(data: dict[str, Any]) -> str | None:

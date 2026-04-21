@@ -1578,6 +1578,305 @@ def test_routed_poke_falls_back_to_raw_inbound_content(
 
 
 
+def test_allowed_private_image_inbound_downloads_to_media_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Allowlisted image inbound should download once into cache."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+                "media_max_size_mb": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9201",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "a.png",
+                                "url": "https://example.com/a.png",
+                                "file_size": "4",
+                            },
+                        }
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            media_path = tmp_path / "media" / "a.png"
+            assert media_path.read_bytes() == b"test"
+            buffered = channel._buffer.get("private:123", "9201")
+            assert buffered is not None
+            assert buffered.media == [channel._file_uri(media_path)]
+            assert "I|i0|a.png" in inbound.content
+            assert "M|9201|peer|[i0]" in inbound.content
+        finally:
+            await _stop_channel(channel, task, server)
+
+    class FakeResponse:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        async def __aenter__(self) -> FakeResponse:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+            del exc_type, exc, tb
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def read(self) -> bytes:
+            return self._body
+
+    calls: list[str] = []
+
+    def fake_get(self: aiohttp.ClientSession, url: str, **kwargs: Any) -> FakeResponse:
+        del self, kwargs
+        calls.append(url)
+        return FakeResponse(b"test")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    asyncio.run(case())
+    assert calls == ["https://example.com/a.png"]
+
+
+
+def test_disallowed_private_image_inbound_skips_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Blocked sessions should return before any image download happens."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["999"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9202",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "blocked.png",
+                                "url": "https://example.com/blocked.png",
+                                "file_size": "4",
+                            },
+                        }
+                    ],
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            assert channel._buffer.get("private:123", "9202") is None
+            assert not (tmp_path / "media" / "blocked.png").exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    calls: list[str] = []
+
+    def fake_get(self: aiohttp.ClientSession, url: str, **kwargs: Any) -> Any:
+        del self, kwargs
+        calls.append(url)
+        raise AssertionError("download should not happen")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    asyncio.run(case())
+    assert calls == []
+
+
+
+def test_cached_private_image_inbound_skips_redownload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Existing cached filenames should be reused without another fetch."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    cached_file = media_dir / "cached.png"
+    cached_file.write_bytes(b"cached")
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+                "media_max_size_mb": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9203",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "cached.png",
+                                "url": "https://example.com/cached.png",
+                                "file_size": "999999",
+                            },
+                        }
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            buffered = channel._buffer.get("private:123", "9203")
+            assert buffered is not None
+            assert buffered.media == [channel._file_uri(cached_file)]
+            assert inbound.metadata["cqmsg_message_ids"] == ["9203"]
+            assert cached_file.read_bytes() == b"cached"
+        finally:
+            await _stop_channel(channel, task, server)
+
+    calls: list[str] = []
+
+    def fake_get(self: aiohttp.ClientSession, url: str, **kwargs: Any) -> Any:
+        del self, kwargs
+        calls.append(url)
+        raise AssertionError("download should be skipped for cache hit")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    asyncio.run(case())
+    assert calls == []
+
+
+
+def test_oversized_private_image_inbound_keeps_placeholder_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Oversized images should not download and should stay placeholder-only."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+                "media_max_size_mb": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9204",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "big.png",
+                                "url": "https://example.com/big.png",
+                                "file_size": str(2 * 1024 * 1024),
+                            },
+                        }
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            buffered = channel._buffer.get("private:123", "9204")
+            assert buffered is not None
+            assert buffered.media == []
+            assert "I|" not in inbound.content
+            assert "M|9204|peer|[image]" in inbound.content
+            assert not (tmp_path / "media" / "big.png").exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    calls: list[str] = []
+
+    def fake_get(self: aiohttp.ClientSession, url: str, **kwargs: Any) -> Any:
+        del self, kwargs
+        calls.append(url)
+        raise AssertionError("download should not happen for oversized image")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    asyncio.run(case())
+    assert calls == []
+
+
+
 def test_send_delta_sends_plain_text_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """send_delta() should fall back to a normal text send."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)

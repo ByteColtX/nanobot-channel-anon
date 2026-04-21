@@ -30,7 +30,14 @@ def test_normalize_private_message_segments() -> None:
             "message_id": 9,
             "message": [
                 {"type": "text", "data": {"text": "hello"}},
-                {"type": "image", "data": {"url": "https://example.com/a.png"}},
+                {
+                    "type": "image",
+                    "data": {
+                        "file": "a.png",
+                        "url": "https://example.com/a.png",
+                        "file_size": 123,
+                    },
+                },
             ],
             "sender": {"user_id": 123, "nickname": "tester", "card": ""},
         }
@@ -47,7 +54,15 @@ def test_normalize_private_message_segments() -> None:
     assert candidate.sender_id == "123"
     assert candidate.chat_id == "private:123"
     assert candidate.content == "hello[image]"
-    assert candidate.media == ["https://example.com/a.png"]
+    assert candidate.media == []
+    assert candidate.metadata["media_items"] == [
+        {
+            "type": "image",
+            "file": "a.png",
+            "url": "https://example.com/a.png",
+            "file_size": "123",
+        }
+    ]
     assert candidate.metadata["sender_nickname"] == "tester"
 
 
@@ -215,11 +230,77 @@ def test_process_inbound_candidate_marks_reply_to_self_and_expands_forward() -> 
             reply_candidate,
             buffer=buffer,
             forward_resolver=_resolve_empty_forward,
+            image_downloader=None,
         )
     )
 
     assert processed_reply.candidate.reply_target_from_self is True
     assert processed_reply.candidate.metadata["reply_target_from_self"] is True
+
+
+
+def test_process_inbound_candidate_downloads_images() -> None:
+    """Inbound processing should materialize image media refs through the downloader."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "message_id": "699",
+            "user_id": "123",
+            "message": [
+                {
+                    "type": "image",
+                    "data": {
+                        "file": "a.png",
+                        "url": "https://example.com/a.png",
+                        "file_size": "123",
+                    },
+                },
+                {
+                    "type": "video",
+                    "data": {
+                        "file": "clip.mp4",
+                        "url": "https://example.com/clip.mp4",
+                        "file_size": "456",
+                    },
+                },
+            ],
+        }
+    )
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+    assert candidate is not None
+
+    seen_items: list[dict[str, str]] = []
+
+    async def _download_image(item: dict[str, str]) -> str | None:
+        seen_items.append(item)
+        return "file:///tmp/a.png"
+
+    async def _resolve_empty_forward(_forward_id: str) -> object:
+        return {"messages": []}
+
+    processed = asyncio.run(
+        process_inbound_candidate(
+            candidate,
+            buffer=Buffer(max_messages=10),
+            forward_resolver=_resolve_empty_forward,
+            image_downloader=_download_image,
+        )
+    )
+
+    assert processed.candidate.media == ["file:///tmp/a.png"]
+    assert seen_items == [
+        {
+            "type": "image",
+            "file": "a.png",
+            "url": "https://example.com/a.png",
+            "file_size": "123",
+        }
+    ]
 
 
 
@@ -264,6 +345,7 @@ def test_process_inbound_candidate_expands_forward_and_cache_writes_message() ->
             candidate,
             buffer=buffer,
             forward_resolver=_resolve_forward,
+            image_downloader=None,
         )
     )
 
@@ -336,6 +418,7 @@ def test_process_inbound_candidate_keeps_forward_node_message_id() -> None:
             candidate,
             buffer=buffer,
             forward_resolver=_resolve_forward,
+            image_downloader=None,
         )
     )
 
@@ -384,6 +467,7 @@ def test_process_inbound_candidate_leaves_forward_source_unknown() -> None:
             candidate,
             buffer=buffer,
             forward_resolver=_resolve_forward,
+            image_downloader=None,
         )
     )
 
