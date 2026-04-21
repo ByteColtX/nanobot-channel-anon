@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -29,7 +29,11 @@ from nanobot_channel_anon.onebot import BotStatus, OneBotAPIRequest, OneBotRawEv
 from nanobot_channel_anon.outbound import build_send_request
 from nanobot_channel_anon.router import InboundRouter
 from nanobot_channel_anon.serializer import serialize_buffer_chat
-from nanobot_channel_anon.utils import normalize_onebot_id
+from nanobot_channel_anon.utils import (
+    build_group_chat_id,
+    build_private_chat_id,
+    normalize_onebot_id,
+)
 
 _CONNECT_TIMEOUT_S = 10.0
 _PING_INTERVAL_S = 30.0
@@ -50,6 +54,14 @@ _SUPPORTED_TRANSCRIPTION_SUFFIXES = {
 }
 
 
+@dataclass(slots=True)
+class _SessionWorker:
+    """A per-session inbound worker."""
+
+    queue: asyncio.Queue[OneBotRawEvent]
+    task: asyncio.Task[None]
+
+
 class AnonChannel(BaseChannel):
     """Anon OneBot v11 channel transport."""
 
@@ -67,7 +79,8 @@ class AnonChannel(BaseChannel):
         self._stop_event: asyncio.Event | None = None
         self._reader_task: asyncio.Task[str] | None = None
         self._ping_task: asyncio.Task[None] | None = None
-        self._inbound_tasks: set[asyncio.Task[None]] = set()
+        self._session_workers: dict[str, _SessionWorker] = {}
+        self._session_workers_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._pending: dict[str, asyncio.Future[OneBotRawEvent]] = {}
         self._echo_counter = 0
@@ -216,7 +229,7 @@ class AnonChannel(BaseChannel):
                         payload.status,
                     )
                     continue
-                self._spawn_inbound_task(payload)
+                await self._enqueue_inbound_event(payload)
                 continue
 
             if message.type in {
@@ -505,18 +518,66 @@ class AnonChannel(BaseChannel):
         if not self._should_stop():
             logger.info("Anon WebSocket disconnected: {}", reason)
 
-    def _spawn_inbound_task(self, payload: OneBotRawEvent) -> None:
-        task = asyncio.create_task(self._handle_inbound_event(payload))
-        self._inbound_tasks.add(task)
-        task.add_done_callback(self._on_inbound_task_done)
-
-    def _on_inbound_task_done(self, task: asyncio.Task[None]) -> None:
-        self._inbound_tasks.discard(task)
-        if task.cancelled():
+    async def _enqueue_inbound_event(self, payload: OneBotRawEvent) -> None:
+        if self._should_stop():
             return
-        exc = task.exception()
-        if exc is not None:
-            logger.warning("Anon inbound handling failed: {}", exc)
+        worker = await self._get_or_create_session_worker(
+            self._session_worker_key_for_payload(payload)
+        )
+        await worker.queue.put(payload)
+
+    async def _get_or_create_session_worker(self, key: str) -> _SessionWorker:
+        async with self._session_workers_lock:
+            existing = self._session_workers.get(key)
+            if existing is not None and not existing.task.done():
+                return existing
+
+            worker = _SessionWorker(
+                queue=asyncio.Queue(),
+                task=asyncio.create_task(self._run_session_worker(key)),
+            )
+            self._session_workers[key] = worker
+            return worker
+
+    async def _run_session_worker(self, key: str) -> None:
+        try:
+            while True:
+                worker = self._session_workers.get(key)
+                if worker is None:
+                    return
+                payload = await worker.queue.get()
+                try:
+                    await self._handle_inbound_event(payload)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Anon inbound handling failed for session {}: {}",
+                        key,
+                        exc,
+                    )
+                finally:
+                    worker.queue.task_done()
+        except asyncio.CancelledError:
+            raise
+
+    @staticmethod
+    def _session_worker_key_for_payload(payload: OneBotRawEvent) -> str:
+        group_id = normalize_onebot_id(payload.group_id)
+        if group_id is not None:
+            return build_group_chat_id(group_id)
+
+        user_id = normalize_onebot_id(payload.user_id)
+        if user_id is not None:
+            return build_private_chat_id(user_id)
+
+        sender = payload.sender
+        if sender is not None:
+            sender_id = normalize_onebot_id(sender.user_id)
+            if sender_id is not None:
+                return build_private_chat_id(sender_id)
+
+        return "private:unknown"
 
     async def _shutdown(self) -> None:
         self._fail_pending(ConnectionError("Channel stopped"))
@@ -537,9 +598,10 @@ class AnonChannel(BaseChannel):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-        inbound_tasks = list(self._inbound_tasks)
-        self._inbound_tasks.clear()
-        for task in inbound_tasks:
+        workers = list(self._session_workers.values())
+        self._session_workers.clear()
+        for worker in workers:
+            task = worker.task
             if task is current_task:
                 continue
             task.cancel()
