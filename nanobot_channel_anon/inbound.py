@@ -34,8 +34,6 @@ EventKind = Literal["private_message", "group_message", "poke"]
 
 _MEDIA_PLACEHOLDERS = {
     "image": "[image]",
-    "video": "[video]",
-    "file": "[file]",
     "record": "[voice]",
 }
 
@@ -124,7 +122,10 @@ def _normalize_message_event(
         chat_id = build_private_chat_id(sender_id)
         event_kind = "private_message"
 
-    parsed = _parse_segments(_segments_from_message(raw.message), self_id=self_id)
+    segments = _segments_from_message(raw.message)
+    parsed = _parse_segments(segments, self_id=self_id)
+    if not parsed.text and _has_only_ignored_media_segments(segments):
+        return None
     content = parsed.text or raw.raw_message.strip()
     content = content[:max_text_length].strip()
 
@@ -574,6 +575,12 @@ def _segments_from_message(
             continue
         segments.append(OneBotMessageSegment.model_validate(item))
     return segments
+
+
+def _has_only_ignored_media_segments(segments: list[OneBotMessageSegment]) -> bool:
+    return bool(segments) and all(
+        segment.type in {"video", "file"} for segment in segments
+    )
 
 
 def _parse_segments(

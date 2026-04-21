@@ -273,6 +273,15 @@ def test_process_inbound_candidate_downloads_images() -> None:
         self_id="42",
     )
     assert candidate is not None
+    assert candidate.content == "[image]"
+    assert candidate.metadata["media_items"] == [
+        {
+            "type": "image",
+            "file": "a.png",
+            "url": "https://example.com/a.png",
+            "file_size": "123",
+        }
+    ]
 
     seen_items: list[dict[str, str]] = []
 
@@ -301,6 +310,89 @@ def test_process_inbound_candidate_downloads_images() -> None:
             "file_size": "123",
         }
     ]
+
+
+
+def test_normalize_message_ignores_video_and_file_segments() -> None:
+    """Unsupported video/file segments should not appear in normalized content."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "user_id": "123",
+            "message": [
+                {"type": "text", "data": {"text": "前"}},
+                {
+                    "type": "video",
+                    "data": {
+                        "file": "clip.mp4",
+                        "url": "https://example.com/clip.mp4",
+                        "file_size": "456",
+                    },
+                },
+                {
+                    "type": "file",
+                    "data": {
+                        "file": "archive.zip",
+                        "url": "https://example.com/archive.zip",
+                        "file_size": "789",
+                    },
+                },
+                {"type": "text", "data": {"text": "后"}},
+            ],
+            "raw_message": "前[CQ:video,file=clip.mp4][CQ:file,file=archive.zip]后",
+        }
+    )
+
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+
+    assert candidate is not None
+    assert candidate.content == "前后"
+    assert candidate.metadata["media_items"] == []
+    assert candidate.metadata["segment_types"] == ["text", "video", "file", "text"]
+
+
+
+def test_normalize_message_drops_pure_video_and_file_segments() -> None:
+    """Pure unsupported video/file messages should be ignored entirely."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "user_id": "123",
+            "message": [
+                {
+                    "type": "video",
+                    "data": {
+                        "file": "clip.mp4",
+                        "url": "https://example.com/clip.mp4",
+                        "file_size": "456",
+                    },
+                },
+                {
+                    "type": "file",
+                    "data": {
+                        "file": "archive.zip",
+                        "url": "https://example.com/archive.zip",
+                        "file_size": "789",
+                    },
+                },
+            ],
+            "raw_message": "[CQ:video,file=clip.mp4][CQ:file,file=archive.zip]",
+        }
+    )
+
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+
+    assert candidate is None
 
 
 

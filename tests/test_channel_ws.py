@@ -2235,6 +2235,164 @@ def test_oversized_private_voice_inbound_keeps_placeholder_only(
 
 
 
+def test_private_video_and_file_inbound_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pure video/file inbound should not be cached or published."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9305",
+                    "user_id": "123",
+                    "raw_message": "[CQ:video,file=clip.mp4][CQ:file,file=archive.zip]",
+                    "message": [
+                        {
+                            "type": "video",
+                            "data": {
+                                "file": "clip.mp4",
+                                "url": "https://example.com/clip.mp4",
+                                "file_size": "4",
+                            },
+                        },
+                        {
+                            "type": "file",
+                            "data": {
+                                "file": "archive.zip",
+                                "url": "https://example.com/archive.zip",
+                                "file_size": "4",
+                            },
+                        },
+                    ],
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            assert channel._buffer.get("private:123", "9305") is None
+            assert not channel._inbound_cache_path.exists()
+            assert not (tmp_path / "media").exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    calls: list[str] = []
+
+    def fake_get(self: aiohttp.ClientSession, url: str, **kwargs: Any) -> Any:
+        del self, kwargs
+        calls.append(url)
+        raise AssertionError("download should not happen for video/file inbound")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    asyncio.run(case())
+    assert calls == []
+
+
+
+def test_private_text_with_video_and_file_inbound_keeps_only_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mixed messages should ignore unsupported video/file segments."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9306",
+                    "user_id": "123",
+                    "raw_message": (
+                        "前[CQ:video,file=clip.mp4][CQ:file,file=archive.zip]后"
+                    ),
+                    "message": [
+                        {"type": "text", "data": {"text": "前"}},
+                        {
+                            "type": "video",
+                            "data": {
+                                "file": "clip.mp4",
+                                "url": "https://example.com/clip.mp4",
+                                "file_size": "4",
+                            },
+                        },
+                        {
+                            "type": "file",
+                            "data": {
+                                "file": "archive.zip",
+                                "url": "https://example.com/archive.zip",
+                                "file_size": "4",
+                            },
+                        },
+                        {"type": "text", "data": {"text": "后"}},
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            buffered = channel._buffer.get("private:123", "9306")
+            assert buffered is not None
+            assert buffered.content == "前后"
+            assert buffered.media == []
+            assert inbound.metadata["cqmsg_message_ids"] == ["9306"]
+            assert "[video]" not in inbound.content
+            assert "[file]" not in inbound.content
+            assert "M|9306|peer|前后" in inbound.content
+        finally:
+            await _stop_channel(channel, task, server)
+
+    calls: list[str] = []
+
+    def fake_get(self: aiohttp.ClientSession, url: str, **kwargs: Any) -> Any:
+        del self, kwargs
+        calls.append(url)
+        raise AssertionError(
+            "download should not happen for ignored video/file segments"
+        )
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    asyncio.run(case())
+    assert calls == []
+
+
+
 def test_send_delta_sends_plain_text_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """send_delta() should fall back to a normal text send."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
