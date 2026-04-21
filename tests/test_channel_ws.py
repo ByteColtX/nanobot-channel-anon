@@ -430,7 +430,7 @@ def test_reader_writes_private_message_to_cache_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A triggered private message should be written to the cache file only."""
+    """A triggered private message should be written to cache and published."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def case() -> None:
@@ -459,8 +459,7 @@ def test_reader_writes_private_message_to_cache_file(
                 }
             )
             await _wait_for(lambda: channel._inbound_cache_path.exists())
-            with pytest.raises(asyncio.TimeoutError):
-                await _consume_inbound(bus, timeout=0.2)
+            inbound = await _consume_inbound(bus)
             snapshot = json.loads(
                 channel._inbound_cache_path.read_text(encoding="utf-8")
             )
@@ -470,6 +469,21 @@ def test_reader_writes_private_message_to_cache_file(
                 snapshot["private:123"][0]["metadata"]["trigger_reason"]
                 == "private_prob"
             )
+            assert inbound.chat_id == "private:123"
+            assert inbound.sender_id == "123"
+            assert inbound.content == "\n".join(
+                [
+                    "<CQMSG/1 bot:me n:1>",
+                    "U|me|42|42|bot",
+                    "U|peer|123|123",
+                    "M|7000|peer|hello",
+                    "</CQMSG/1>",
+                ]
+            )
+            assert inbound.metadata["trigger_reason"] == "private_prob"
+            assert inbound.metadata["cqmsg_message_ids"] == ["7000"]
+            assert inbound.metadata["cqmsg_count"] == 1
+            assert channel._buffer.get_unconsumed_chat_entries("private:123") == []
         finally:
             await _stop_channel(channel, task, server)
 
@@ -533,8 +547,7 @@ def test_reader_keeps_forward_placeholder(
                 }
             )
             await _wait_for(lambda: channel._inbound_cache_path.exists())
-            with pytest.raises(asyncio.TimeoutError):
-                await _consume_inbound(bus, timeout=0.2)
+            inbound = await _consume_inbound(bus)
             snapshot = json.loads(
                 channel._inbound_cache_path.read_text(encoding="utf-8")
             )
@@ -552,6 +565,10 @@ def test_reader_keeps_forward_placeholder(
             buffered = channel._buffer.get("private:123", "700")
             assert buffered is not None
             assert buffered.expanded_forwards[0].nodes[0].content == "hello"
+            assert inbound.metadata["cqmsg_message_ids"] == ["700"]
+            assert "M|700|peer|看看[F:f0]" in inbound.content
+            assert "F|f0|1|聊天记录" in inbound.content
+            assert "N|f0.0|u0||hello" in inbound.content
         finally:
             await _stop_channel(channel, task, server)
 
@@ -662,8 +679,7 @@ def test_reader_fetches_forward_content_by_id(
                 }
             )
             await _wait_for(lambda: channel._inbound_cache_path.exists())
-            with pytest.raises(asyncio.TimeoutError):
-                await _consume_inbound(bus, timeout=0.2)
+            inbound = await _consume_inbound(bus)
             snapshot = json.loads(
                 channel._inbound_cache_path.read_text(encoding="utf-8")
             )
@@ -674,6 +690,8 @@ def test_reader_fetches_forward_content_by_id(
                 == "forwarded"
             )
             assert _find_action(server, "get_forward_msg")["params"] == {"id": "fwd-2"}
+            assert inbound.metadata["cqmsg_message_ids"] == ["701"]
+            assert "N|f0.0|u0||forwarded" in inbound.content
         finally:
             await _stop_channel(channel, task, server)
 
@@ -742,8 +760,7 @@ def test_reader_marks_get_forward_msg_failure_unresolved(
                 }
             )
             await _wait_for(lambda: channel._inbound_cache_path.exists())
-            with pytest.raises(asyncio.TimeoutError):
-                await _consume_inbound(bus, timeout=0.2)
+            inbound = await _consume_inbound(bus)
             snapshot = json.loads(
                 channel._inbound_cache_path.read_text(encoding="utf-8")
             )
@@ -751,6 +768,9 @@ def test_reader_marks_get_forward_msg_failure_unresolved(
             assert expanded["forward_id"] == "fwd-expired"
             assert expanded["unresolved"] is True
             assert expanded["nodes"] == []
+            assert inbound.metadata["cqmsg_message_ids"] == ["702"]
+            assert "M|702|peer|看看[F:f0]" in inbound.content
+            assert "F|f0|0" in inbound.content
             assert any(
                 "WARNING|Anon get_forward_msg returned failure:" in msg
                 for msg in messages
@@ -832,8 +852,7 @@ def test_reader_marks_get_forward_msg_null_data_unresolved(
                 }
             )
             await _wait_for(lambda: channel._inbound_cache_path.exists())
-            with pytest.raises(asyncio.TimeoutError):
-                await _consume_inbound(bus, timeout=0.2)
+            inbound = await _consume_inbound(bus)
             snapshot = json.loads(
                 channel._inbound_cache_path.read_text(encoding="utf-8")
             )
@@ -841,6 +860,9 @@ def test_reader_marks_get_forward_msg_null_data_unresolved(
             assert expanded["forward_id"] == "fwd-null"
             assert expanded["unresolved"] is True
             assert expanded["nodes"] == []
+            assert inbound.metadata["cqmsg_message_ids"] == ["703"]
+            assert "M|703|peer|看看[F:f0]" in inbound.content
+            assert "F|f0|0" in inbound.content
             assert any(
                 (
                     "WARNING|Anon get_forward_msg returned failure: "
@@ -1060,8 +1082,8 @@ def test_send_does_not_reply_to_last_inbound_message(
                 }
             )
             await _wait_for(lambda: channel._inbound_cache_path.exists())
-            with pytest.raises(asyncio.TimeoutError):
-                await _consume_inbound(bus, timeout=0.2)
+            inbound = await _consume_inbound(bus)
+            assert inbound.metadata["cqmsg_message_ids"] == ["777"]
             await channel.send(
                 OutboundMessage(channel="anon", chat_id="private:123", content="reply")
             )
@@ -1155,13 +1177,20 @@ def test_group_reply_only_triggers_for_bot_message(
                 }
             )
             await _wait_for(lambda: channel._inbound_cache_path.exists())
-            with pytest.raises(asyncio.TimeoutError):
-                await _consume_inbound(bus, timeout=0.2)
+            inbound = await _consume_inbound(bus)
             snapshot = json.loads(
                 channel._inbound_cache_path.read_text(encoding="utf-8")
             )
             assert snapshot["group:2"][0]["metadata"]["trigger_reason"] == "reply"
             assert snapshot["group:2"][0]["metadata"]["reply_target_from_self"] is True
+            assert inbound.chat_id == "group:2"
+            assert inbound.sender_id == "123"
+            assert inbound.metadata["trigger_reason"] == "reply"
+            assert inbound.metadata["cqmsg_message_ids"] == ["9013", "9100"]
+            assert inbound.metadata["cqmsg_count"] == 2
+            assert "M|9013|u0|hello" in inbound.content
+            assert "M|9100|u1|>m:9013 收到" in inbound.content
+            assert channel._buffer.get_unconsumed_chat_entries("group:2") == []
         finally:
             await _stop_channel(channel, task, server)
 
@@ -1224,10 +1253,248 @@ def test_group_reply_to_non_bot_message_does_not_trigger(
     asyncio.run(case())
 
 
+def test_allowlisted_group_inbound_accepts_matching_group_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Group inbound should pass when allow_from contains the group ID."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["2"],
+                "group_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9102",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "raw_message": "hello group",
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            assert snapshot["group:2"][0]["sender_id"] == "123"
+            assert snapshot["group:2"][0]["content"] == "hello group"
+            assert inbound.chat_id == "group:2"
+            assert inbound.sender_id == "123"
+            assert inbound.metadata["group_id"] == "2"
+            assert inbound.metadata["trigger_reason"] == "group_prob"
+            assert inbound.metadata["cqmsg_message_ids"] == ["9102"]
+            assert "<CQMSG/1 g:2 bot:u0 n:1>" in inbound.content
+            assert "M|9102|u1|hello group" in inbound.content
+            assert channel._buffer.get_unconsumed_chat_entries("group:2") == []
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_allowlisted_group_inbound_accepts_matching_sender_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Group inbound should pass when allow_from contains the sender ID."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "group_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9103",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "raw_message": "hello sender",
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            assert snapshot["group:2"][0]["sender_id"] == "123"
+            assert snapshot["group:2"][0]["content"] == "hello sender"
+            assert inbound.chat_id == "group:2"
+            assert inbound.sender_id == "123"
+            assert inbound.metadata["group_id"] == "2"
+            assert inbound.metadata["cqmsg_message_ids"] == ["9103"]
+            assert channel._buffer.get_unconsumed_chat_entries("group:2") == []
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_group_inbound_rejects_unlisted_sender_and_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Group inbound should stop before cache/publish when sender/group are unlisted."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["999"],
+                "group_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9104",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "raw_message": "blocked group",
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            assert channel._buffer.get("group:2", "9104") is None
+            assert not channel._inbound_cache_path.exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_wildcard_allow_from_allows_private_inbound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Wildcard allow_from should allow private inbound from any sender."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["*"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9105",
+                    "user_id": "456",
+                    "raw_message": "wildcard",
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            assert snapshot["private:456"][0]["sender_id"] == "456"
+            assert inbound.chat_id == "private:456"
+            assert inbound.sender_id == "456"
+            assert inbound.metadata["cqmsg_message_ids"] == ["9105"]
+            assert channel._buffer.get_unconsumed_chat_entries("private:456") == []
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_empty_allow_from_rejects_private_inbound_before_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Empty allow_from should reject private inbound before cache and publish."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": [],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9106",
+                    "user_id": "123",
+                    "raw_message": "blocked private",
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            assert channel._buffer.get("private:123", "9106") is None
+            assert not channel._inbound_cache_path.exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
 def test_allowlisted_inbound_is_cached_without_publish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Allowlisted inbound messages should be buffered even when routing drops them."""
+    """Allowlisted inbound messages should be buffered when routing drops them."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def case() -> None:
@@ -1260,14 +1527,18 @@ def test_allowlisted_inbound_is_cached_without_publish(
             assert buffered is not None
             assert buffered.is_from_self is False
             assert buffered.content == "hello"
+            unread_entries = channel._buffer.get_unconsumed_chat_entries("private:123")
+            assert [entry.message_id for entry in unread_entries] == ["9102"]
         finally:
             await _stop_channel(channel, task, server)
 
     asyncio.run(case())
 
 
-def test_build_incremental_cqmsg_and_ack(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Channel CQMSG build should stay stable until ack, then advance."""
+def test_routed_poke_falls_back_to_raw_inbound_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Routed poke events should publish raw content when CQMSG is unavailable."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def case() -> None:
@@ -1278,59 +1549,28 @@ def test_build_incremental_cqmsg_and_ack(monkeypatch: pytest.MonkeyPatch) -> Non
             {
                 "ws_url": server.url,
                 "allow_from": ["123"],
-                "private_trigger_prob": 1.0,
+                "trigger_on_poke": True,
             },
             bus,
         )
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
-            channel._buffer.add(
-                MessageEntry(
-                    message_id="1",
-                    chat_id="private:123",
-                    sender_id="123",
-                    sender_name="peer",
-                    is_from_self=False,
-                    content="hello",
-                )
+            await server.send_json(
+                {
+                    "post_type": "notice",
+                    "notice_type": "notify",
+                    "sub_type": "poke",
+                    "user_id": "123",
+                    "target_id": "42",
+                }
             )
-            channel._buffer.add(
-                MessageEntry(
-                    message_id="2",
-                    chat_id="private:123",
-                    sender_id="42",
-                    sender_name="bot",
-                    is_from_self=True,
-                    content="world",
-                )
-            )
-
-            first = channel.build_incremental_cqmsg("private:123")
-            second = channel.build_incremental_cqmsg("private:123")
-
-            assert first is not None
-            assert second is not None
-            assert first.text == second.text
-            assert (
-                channel.ack_incremental_cqmsg("private:123", first.message_ids)
-                is True
-            )
-            assert channel.build_incremental_cqmsg("private:123") is None
-
-            channel._buffer.add(
-                MessageEntry(
-                    message_id="3",
-                    chat_id="private:123",
-                    sender_id="123",
-                    sender_name="peer",
-                    is_from_self=False,
-                    content="again",
-                )
-            )
-            third = channel.build_incremental_cqmsg("private:123")
-            assert third is not None
-            assert third.message_ids == ["3"]
+            inbound = await _consume_inbound(bus)
+            assert inbound.chat_id == "private:123"
+            assert inbound.sender_id == "123"
+            assert inbound.content == "戳了戳你"
+            assert inbound.metadata["trigger_reason"] == "poke"
+            assert "cqmsg_message_ids" not in inbound.metadata
         finally:
             await _stop_channel(channel, task, server)
 

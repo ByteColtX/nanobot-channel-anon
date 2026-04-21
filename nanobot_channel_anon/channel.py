@@ -11,7 +11,7 @@ from typing import Any
 
 import aiohttp
 from loguru import logger
-from nanobot.bus.events import OutboundMessage
+from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from pydantic import ValidationError
@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from nanobot_channel_anon.buffer import Buffer, MessageEntry
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.inbound import (
+    InboundCandidate,
     cache_inbound_candidate,
     normalize_inbound_event,
     process_inbound_candidate,
@@ -26,7 +27,7 @@ from nanobot_channel_anon.inbound import (
 from nanobot_channel_anon.onebot import BotStatus, OneBotAPIRequest, OneBotRawEvent
 from nanobot_channel_anon.outbound import build_send_request
 from nanobot_channel_anon.router import InboundRouter
-from nanobot_channel_anon.serializer import SerializedCQMessage, serialize_buffer_chat
+from nanobot_channel_anon.serializer import serialize_buffer_chat
 from nanobot_channel_anon.utils import normalize_onebot_id
 
 _CONNECT_TIMEOUT_S = 10.0
@@ -157,14 +158,6 @@ class AnonChannel(BaseChannel):
                 metadata=outbound_metadata,
             )
         )
-
-    def build_incremental_cqmsg(self, chat_id: str) -> SerializedCQMessage | None:
-        """Build a CQMSG block from unread buffered messages."""
-        return serialize_buffer_chat(self._buffer, chat_id, self_id=self._self_id)
-
-    def ack_incremental_cqmsg(self, chat_id: str, message_ids: list[str]) -> bool:
-        """Advance the unread cursor for a serialized CQMSG batch."""
-        return self._buffer.mark_chat_entries_consumed(chat_id, message_ids)
 
     async def _connect_ws(self) -> aiohttp.ClientWebSocketResponse:
         session = self._require_session()
@@ -315,6 +308,45 @@ class AnonChannel(BaseChannel):
             nickname,
         )
 
+    def _is_allowed_inbound_candidate(self, candidate: InboundCandidate) -> bool:
+        allow_list = self.config.allow_from
+        if not allow_list:
+            logger.warning("{}: allow_from is empty — all access denied", self.name)
+            return False
+        if "*" in allow_list:
+            return True
+        if candidate.sender_id in allow_list:
+            return True
+        if candidate.event_kind != "group_message":
+            return False
+        group_id = normalize_onebot_id(candidate.metadata.get("group_id"))
+        return group_id is not None and group_id in allow_list
+
+    async def _publish_inbound_message(
+        self,
+        sender_id: str,
+        chat_id: str,
+        content: str,
+        *,
+        media: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
+    ) -> None:
+        meta = metadata or {}
+        if self.supports_streaming:
+            meta = {**meta, "_wants_stream": True}
+        await self.bus.publish_inbound(
+            InboundMessage(
+                channel=self.name,
+                sender_id=str(sender_id),
+                chat_id=str(chat_id),
+                content=content,
+                media=media or [],
+                metadata=meta,
+                session_key_override=session_key,
+            )
+        )
+
     async def _handle_inbound_event(self, payload: OneBotRawEvent) -> None:
         candidate = normalize_inbound_event(
             payload,
@@ -333,11 +365,12 @@ class AnonChannel(BaseChannel):
             )
             return
 
-        if not self.is_allowed(candidate.sender_id):
+        if not self._is_allowed_inbound_candidate(candidate):
             logger.warning(
-                "Access denied for sender {} on channel {}. "
-                "Add them to allowFrom list in config to grant access.",
+                "Access denied for sender {} in chat {} on channel {}. "
+                "Add the sender ID or group ID to allow_from to grant access.",
                 candidate.sender_id,
+                candidate.chat_id,
                 self.name,
             )
             return
@@ -366,6 +399,36 @@ class AnonChannel(BaseChannel):
                 candidate.chat_id,
             )
             return
+
+        serialized = serialize_buffer_chat(
+            self._buffer,
+            routed.chat_id,
+            self_id=self._self_id,
+        )
+        metadata = dict(routed.metadata)
+        metadata["message_id"] = routed.metadata.get("message_id")
+
+        content = routed.content
+        media = list(routed.media)
+        if serialized is not None:
+            content = serialized.text
+            media = []
+            metadata["cqmsg_message_ids"] = list(serialized.message_ids)
+            metadata["cqmsg_count"] = serialized.count
+
+        await self._publish_inbound_message(
+            routed.sender_id,
+            routed.chat_id,
+            content,
+            media=media,
+            metadata=metadata,
+            session_key=routed.session_key,
+        )
+        if serialized is not None:
+            self._buffer.mark_chat_entries_consumed(
+                routed.chat_id,
+                serialized.message_ids,
+            )
 
     def _write_inbound_cache_file(self) -> None:
         snapshot = {

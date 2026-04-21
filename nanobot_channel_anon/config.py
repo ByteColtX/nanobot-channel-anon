@@ -26,7 +26,7 @@ class AnonConfig(Base):
     )
     allow_from: list[str] = Field(
         default_factory=list,
-        description='Allowed sender IDs. ["*"] allows all, [] denies all.',
+        description='Allowed sender or group IDs. ["*"] allows all, [] denies all.',
     )
     private_trigger_prob: float = Field(
         default=0.85,
