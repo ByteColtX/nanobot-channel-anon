@@ -19,7 +19,6 @@ from pydantic import ValidationError
 from nanobot_channel_anon.buffer import Buffer, MessageEntry
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.inbound import (
-    InboundCandidate,
     cache_inbound_candidate,
     normalize_inbound_event,
     process_inbound_candidate,
@@ -71,7 +70,7 @@ class AnonChannel(BaseChannel):
 
     async def start(self) -> None:
         """Start the channel and keep reconnecting until stopped."""
-        ws_url = self._ws_url()
+        ws_url = self.config.ws_url
         if not ws_url:
             raise ValueError("anon channel ws_url is required")
         if self._running:
@@ -162,20 +161,20 @@ class AnonChannel(BaseChannel):
     async def _connect_ws(self) -> aiohttp.ClientWebSocketResponse:
         session = self._require_session()
         headers: dict[str, str] = {}
-        access_token = self._access_token()
+        access_token = self.config.access_token
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"
 
         timeout = aiohttp.ClientWSTimeout(ws_receive=_READ_TIMEOUT_S)  # pyright: ignore[reportCallIssue]
         ws = await session.ws_connect(
-            self._ws_url(),
+            self.config.ws_url,
             headers=headers or None,
             autoping=True,
             heartbeat=None,
             timeout=timeout,
         )
         self._ws = ws
-        logger.info("Anon WebSocket connected: {}", self._ws_url())
+        logger.info("Anon WebSocket connected: {}", self.config.ws_url)
         return ws
 
     async def _listen_loop(self, ws: aiohttp.ClientWebSocketResponse) -> str:
@@ -308,45 +307,6 @@ class AnonChannel(BaseChannel):
             nickname,
         )
 
-    def _is_allowed_inbound_candidate(self, candidate: InboundCandidate) -> bool:
-        allow_list = self.config.allow_from
-        if not allow_list:
-            logger.warning("{}: allow_from is empty — all access denied", self.name)
-            return False
-        if "*" in allow_list:
-            return True
-        if candidate.sender_id in allow_list:
-            return True
-        if candidate.event_kind != "group_message":
-            return False
-        group_id = normalize_onebot_id(candidate.metadata.get("group_id"))
-        return group_id is not None and group_id in allow_list
-
-    async def _publish_inbound_message(
-        self,
-        sender_id: str,
-        chat_id: str,
-        content: str,
-        *,
-        media: list[str] | None = None,
-        metadata: dict[str, Any] | None = None,
-        session_key: str | None = None,
-    ) -> None:
-        meta = metadata or {}
-        if self.supports_streaming:
-            meta = {**meta, "_wants_stream": True}
-        await self.bus.publish_inbound(
-            InboundMessage(
-                channel=self.name,
-                sender_id=str(sender_id),
-                chat_id=str(chat_id),
-                content=content,
-                media=media or [],
-                metadata=meta,
-                session_key_override=session_key,
-            )
-        )
-
     async def _handle_inbound_event(self, payload: OneBotRawEvent) -> None:
         candidate = normalize_inbound_event(
             payload,
@@ -365,7 +325,17 @@ class AnonChannel(BaseChannel):
             )
             return
 
-        if not self._is_allowed_inbound_candidate(candidate):
+        allow_list = self.config.allow_from
+        allowed = False
+        if not allow_list:
+            logger.warning("{}: allow_from is empty — all access denied", self.name)
+        elif "*" in allow_list or candidate.sender_id in allow_list:
+            allowed = True
+        elif candidate.event_kind == "group_message":
+            group_id = normalize_onebot_id(candidate.metadata.get("group_id"))
+            allowed = group_id is not None and group_id in allow_list
+
+        if not allowed:
             logger.warning(
                 "Access denied for sender {} in chat {} on channel {}. "
                 "Add the sender ID or group ID to allow_from to grant access.",
@@ -406,7 +376,6 @@ class AnonChannel(BaseChannel):
             self_id=self._self_id,
         )
         metadata = dict(routed.metadata)
-        metadata["message_id"] = routed.metadata.get("message_id")
 
         content = routed.content
         media = list(routed.media)
@@ -416,13 +385,19 @@ class AnonChannel(BaseChannel):
             metadata["cqmsg_message_ids"] = list(serialized.message_ids)
             metadata["cqmsg_count"] = serialized.count
 
-        await self._publish_inbound_message(
-            routed.sender_id,
-            routed.chat_id,
-            content,
-            media=media,
-            metadata=metadata,
-            session_key=routed.session_key,
+        if self.supports_streaming:
+            metadata["_wants_stream"] = True
+
+        await self.bus.publish_inbound(
+            InboundMessage(
+                channel=self.name,
+                sender_id=routed.sender_id,
+                chat_id=routed.chat_id,
+                content=content,
+                media=media,
+                metadata=metadata,
+                session_key_override=routed.session_key,
+            )
         )
         if serialized is not None:
             self._buffer.mark_chat_entries_consumed(
@@ -534,12 +509,6 @@ class AnonChannel(BaseChannel):
     def _next_echo(self) -> str:
         self._echo_counter += 1
         return f"api_{self._echo_counter}"
-
-    def _ws_url(self) -> str:
-        return self.config.ws_url
-
-    def _access_token(self) -> str:
-        return self.config.access_token
 
     def _resolve_pending(self, payload: OneBotRawEvent) -> bool:
         echo = payload.echo
