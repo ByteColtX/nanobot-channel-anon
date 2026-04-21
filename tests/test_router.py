@@ -1,5 +1,7 @@
 """Tests for OneBot inbound routing."""
 
+import hashlib
+import math
 from typing import Any
 
 from nanobot_channel_anon.config import AnonConfig
@@ -103,6 +105,49 @@ def test_route_group_message_drops_without_trigger() -> None:
     routed = router.route(_candidate(content="plain text"))
 
     assert routed is None
+
+
+def test_route_probability_sampling_is_stable() -> None:
+    """Stable sampling should make repeated routing decisions deterministic."""
+    candidate = _candidate(
+        event_kind="private_message",
+        chat_id="private:123",
+        content="stable sample",
+        metadata={"message_id": "1001"},
+    )
+    probability = math.nextafter(InboundRouter._sample_value(candidate), 1.0)
+    router = InboundRouter(AnonConfig(private_trigger_prob=probability))
+
+    first = router.route(candidate)
+    second = router.route(
+        _candidate(
+            event_kind="private_message",
+            chat_id="private:123",
+            content="stable sample",
+            metadata={"message_id": "1001"},
+        )
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.metadata["trigger_reason"] == "private_prob"
+    assert second.metadata["trigger_reason"] == "private_prob"
+
+
+def test_sample_value_uses_chat_sender_and_message_id() -> None:
+    """Stable sampling should hash chat_id, sender_id, and message_id only."""
+    candidate = _candidate(
+        event_kind="group_message",
+        chat_id="group:456",
+        content="hello",
+        metadata={"message_id": "2002"},
+    )
+
+    expected_seed = "\x1f".join(("group:456", "123", "2002"))
+    expected_digest = hashlib.sha256(expected_seed.encode("utf-8")).digest()
+    expected_value = int.from_bytes(expected_digest[:8], byteorder="big") / 2**64
+
+    assert InboundRouter._sample_value(candidate) == expected_value
 
 
 def test_route_poke_applies_cooldown() -> None:

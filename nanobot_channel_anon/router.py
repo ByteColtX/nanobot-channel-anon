@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import random
+import hashlib
 import time
 
 from nanobot_channel_anon.config import AnonConfig
@@ -30,7 +30,7 @@ class InboundRouter:
     def _route_private(self, candidate: InboundCandidate) -> InboundCandidate | None:
         if not candidate.content:
             return None
-        if not self._passes_probability(self.config.private_trigger_prob):
+        if not self._passes_probability(candidate, self.config.private_trigger_prob):
             return None
         return self._with_trigger_reason(candidate, "private_prob")
 
@@ -43,7 +43,7 @@ class InboundRouter:
             return self._with_trigger_reason(candidate, "reply")
         if not candidate.content:
             return None
-        if not self._passes_probability(self.config.group_trigger_prob):
+        if not self._passes_probability(candidate, self.config.group_trigger_prob):
             return None
         return self._with_trigger_reason(candidate, "group_prob")
 
@@ -75,12 +75,25 @@ class InboundRouter:
         return False
 
     @staticmethod
-    def _passes_probability(probability: float) -> bool:
+    def _passes_probability(candidate: InboundCandidate, probability: float) -> bool:
         if probability <= 0:
             return False
         if probability >= 1:
             return True
-        return random.random() < probability
+        return InboundRouter._sample_value(candidate) < probability
+
+    @staticmethod
+    def _sample_value(candidate: InboundCandidate) -> float:
+        seed = "\x1f".join(
+            (
+                candidate.chat_id,
+                candidate.sender_id,
+                str(candidate.metadata.get("message_id") or ""),
+            )
+        )
+        digest = hashlib.sha256(seed.encode("utf-8")).digest()
+        value = int.from_bytes(digest[:8], byteorder="big")
+        return value / 2**64
 
     @staticmethod
     def _with_trigger_reason(
