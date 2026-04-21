@@ -61,6 +61,7 @@ class AnonChannel(BaseChannel):
         self._pending: dict[str, asyncio.Future[OneBotRawEvent]] = {}
         self._echo_counter = 0
         self._self_id: str | None = None
+        self._self_nickname: str = ""
         self._buffer = Buffer(self.config.max_context_messages)
         self._router = InboundRouter(self.config)
         self._inbound_cache_path = _INBOUND_CACHE_PATH
@@ -302,11 +303,11 @@ class AnonChannel(BaseChannel):
             return
 
         self._self_id = user_id
-        nickname = info.get("nickname")
+        self._self_nickname = str(info.get("nickname") or "")
         logger.info(
             "Anon bot identity loaded: self_id={} nickname={}",
             user_id,
-            nickname,
+            self._self_nickname,
         )
 
     async def _handle_inbound_event(self, payload: OneBotRawEvent) -> None:
@@ -353,6 +354,7 @@ class AnonChannel(BaseChannel):
                 buffer=self._buffer,
                 forward_resolver=self._resolve_forward_content,
                 image_downloader=self._download_inbound_image,
+                voice_processor=self._process_inbound_voice,
             )
         except Exception as exc:
             logger.warning("Anon inbound processing failed: {}", exc)
@@ -377,6 +379,7 @@ class AnonChannel(BaseChannel):
             self._buffer,
             routed.chat_id,
             self_id=self._self_id,
+            self_nickname=self._self_nickname,
         )
         metadata = dict(routed.metadata)
 
@@ -601,6 +604,26 @@ class AnonChannel(BaseChannel):
         return response.data
 
     async def _download_inbound_image(self, media_item: dict[str, Any]) -> str | None:
+        local_file = await self._download_inbound_media(media_item)
+        if local_file is None:
+            return None
+        return self._file_uri(local_file)
+
+    async def _process_inbound_voice(
+        self,
+        media_item: dict[str, Any],
+    ) -> dict[str, str] | None:
+        local_file = await self._download_inbound_media(media_item)
+        if local_file is None:
+            return None
+
+        result = {"local_file_uri": self._file_uri(local_file)}
+        transcription_text = (await self.transcribe_audio(local_file)).strip()
+        if transcription_text:
+            result["transcription_text"] = transcription_text
+        return result
+
+    async def _download_inbound_media(self, media_item: dict[str, Any]) -> Path | None:
         file_name = str(media_item.get("file") or "").strip()
         url = str(media_item.get("url") or "").strip()
         if not file_name or not url:
@@ -613,7 +636,7 @@ class AnonChannel(BaseChannel):
         target_path = get_media_dir("anon") / target_name
         target_path.parent.mkdir(parents=True, exist_ok=True)
         if target_path.exists():
-            return self._file_uri(target_path)
+            return target_path
 
         file_size_raw = str(media_item.get("file_size") or "").strip()
         if not file_size_raw:
@@ -631,7 +654,7 @@ class AnonChannel(BaseChannel):
         async with session.get(url) as response:
             response.raise_for_status()
             target_path.write_bytes(await response.read())
-        return self._file_uri(target_path)
+        return target_path
 
     @staticmethod
     def _file_uri(path: Path) -> str:
@@ -652,9 +675,10 @@ class AnonChannel(BaseChannel):
                 message_id=message_id,
                 chat_id=msg.chat_id,
                 sender_id=self._self_id or "",
-                sender_name=self._self_id or "",
+                sender_name=self._self_nickname or self._self_id or "",
                 is_from_self=True,
                 content=msg.content,
+                sender_nickname=self._self_nickname,
                 media=list(msg.media),
                 reply_to_message_id=normalize_onebot_id(
                     msg.metadata.get("reply_to_message_id")

@@ -21,6 +21,15 @@ from nanobot_channel_anon.utils import (
     string_value,
 )
 
+
+def _display_name(*values: str | None) -> str:
+    for value in values:
+        normalized = string_value(value)
+        if normalized is not None:
+            return normalized
+    return ""
+
+
 EventKind = Literal["private_message", "group_message", "poke"]
 
 _MEDIA_PLACEHOLDERS = {
@@ -156,6 +165,7 @@ def _normalize_message_event(
 
 ForwardResolver = Callable[[str], Awaitable[Any]]
 ImageDownloader = Callable[[dict[str, Any]], Awaitable[str | None]]
+VoiceProcessor = Callable[[dict[str, Any]], Awaitable[dict[str, str] | None]]
 
 
 @dataclass(slots=True)
@@ -182,10 +192,12 @@ async def process_inbound_candidate(
     buffer: Buffer,
     forward_resolver: ForwardResolver,
     image_downloader: ImageDownloader | None = None,
+    voice_processor: VoiceProcessor | None = None,
 ) -> InboundProcessingResult:
-    """补充 forward 语义与图片本地化结果, 供调用方写入最近消息缓存."""
+    """补充媒体、forward 语义结果, 供调用方写入最近消息缓存."""
     _set_reply_target_from_self(candidate, buffer)
     candidate.media = await _download_candidate_images(candidate, image_downloader)
+    await _process_candidate_voices(candidate, voice_processor)
     expanded_forwards = await _expand_candidate_forwards(candidate, forward_resolver)
     candidate.metadata["expanded_forwards"] = [
         _forward_entry_metadata(item) for item in expanded_forwards
@@ -211,6 +223,39 @@ async def _download_candidate_images(
         if media_ref is not None:
             media_refs.append(media_ref)
     return media_refs
+
+
+async def _process_candidate_voices(
+    candidate: InboundCandidate,
+    voice_processor: VoiceProcessor | None,
+) -> None:
+    if voice_processor is None:
+        return
+
+    replacements: list[str | None] = []
+    for item in _list_value(candidate.metadata.get("media_items")):
+        if not isinstance(item, dict) or item.get("type") != "record":
+            continue
+
+        try:
+            result = await voice_processor(item)
+        except Exception:
+            result = None
+        replacement: str | None = None
+        if isinstance(result, dict):
+            local_file_uri = string_value(result.get("local_file_uri"))
+            if local_file_uri is not None:
+                item["local_file_uri"] = local_file_uri
+
+            transcription_text = string_value(result.get("transcription_text"))
+            if transcription_text is not None:
+                item["transcription_text"] = transcription_text
+                replacement = f"[transcription: {transcription_text}]"
+
+        replacements.append(replacement)
+
+    if replacements:
+        candidate.content = _replace_voice_placeholders(candidate.content, replacements)
 
 
 async def _expand_candidate_forwards(
@@ -297,12 +342,21 @@ def _buffer_inbound_message(
             chat_id=candidate.chat_id,
             sender_id=candidate.sender_id,
             sender_name=(
-                str(candidate.metadata.get("sender_card") or "")
-                or str(candidate.metadata.get("sender_nickname") or "")
-                or candidate.sender_id
+                _display_name(
+                    candidate.metadata.get("sender_card"),
+                    candidate.metadata.get("sender_nickname"),
+                    candidate.sender_id,
+                )
+                if candidate.event_kind == "group_message"
+                else _display_name(
+                    candidate.metadata.get("sender_nickname"),
+                    candidate.sender_id,
+                )
             ),
             is_from_self=False,
             content=candidate.content,
+            sender_nickname=_display_name(candidate.metadata.get("sender_nickname")),
+            sender_card=_display_name(candidate.metadata.get("sender_card")),
             media=list(candidate.media),
             reply_to_message_id=candidate.reply_to_message_id,
             event_time=candidate.metadata.get("event_time"),
@@ -323,6 +377,8 @@ def _forward_entry_metadata(entry: ForwardEntry) -> dict[str, Any]:
             {
                 "sender_id": node.sender_id,
                 "sender_name": node.sender_name,
+                "sender_nickname": node.sender_nickname,
+                "sender_card": node.sender_card,
                 "source_chat_id": node.source_chat_id,
                 "content": node.content,
                 "message_id": node.message_id,
@@ -380,14 +436,13 @@ def _build_forward_node(node: dict[str, Any]) -> ForwardNodeEntry:
     sender_id = normalize_onebot_id(
         data.get("user_id") or data.get("uin") or _dict_get(sender, "user_id")
     )
-    sender_name = (
-        string_value(data.get("nickname"))
-        or string_value(data.get("name"))
-        or string_value(_dict_get(sender, "nickname"))
-        or string_value(_dict_get(sender, "card"))
-        or sender_id
-        or ""
+    sender_nickname = _display_name(
+        data.get("nickname"),
+        data.get("name"),
+        _dict_get(sender, "nickname"),
     )
+    sender_card = _display_name(data.get("card"), _dict_get(sender, "card"))
+    sender_name = _display_name(sender_card, sender_nickname, sender_id)
 
     content_source = data.get("content")
     if content_source is None:
@@ -401,6 +456,8 @@ def _build_forward_node(node: dict[str, Any]) -> ForwardNodeEntry:
         sender_name=sender_name,
         source_chat_id=None,
         content=content,
+        sender_nickname=sender_nickname,
+        sender_card=sender_card,
         message_id=normalize_onebot_id(data.get("message_id") or data.get("id")),
         media=parsed.media,
         reply_to_message_id=parsed.reply_to_message_id,
@@ -615,6 +672,15 @@ def _first_media_ref(data: dict[str, Any]) -> str | None:
         if value is not None:
             return value
     return None
+
+
+def _replace_voice_placeholders(content: str, replacements: list[str | None]) -> str:
+    updated = content
+    for replacement in replacements:
+        if "[voice]" not in updated:
+            break
+        updated = updated.replace("[voice]", replacement or "[voice]", 1)
+    return updated
 
 
 

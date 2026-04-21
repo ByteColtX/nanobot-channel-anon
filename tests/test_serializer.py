@@ -165,6 +165,78 @@ def test_serialize_group_chat_uses_un_and_unresolved_forward() -> None:
     )
 
 
+def test_serialize_private_chat_prefers_nickname_for_u_rows() -> None:
+    """Private chats should prefer nickname over raw QQ IDs in U rows."""
+    entries = [
+        MessageEntry(
+            message_id="1",
+            chat_id="private:123",
+            sender_id="123",
+            sender_name="123",
+            sender_nickname="Alice",
+            is_from_self=False,
+            content="hello",
+        ),
+        MessageEntry(
+            message_id="2",
+            chat_id="private:123",
+            sender_id="42",
+            sender_name="42",
+            sender_nickname="anon-bot",
+            is_from_self=True,
+            content="reply",
+        ),
+    ]
+
+    serialized = serialize_chat_entries("private:123", entries, self_id="42")
+
+    assert serialized is not None
+    assert "U|peer|123|Alice" in serialized.text
+    assert "U|me|42|anon-bot|bot" in serialized.text
+
+
+
+def test_serialize_group_chat_prefers_card_then_nickname_then_qq() -> None:
+    """Group chats should prefer card, then nickname, then QQ ID in U rows."""
+    entries = [
+        MessageEntry(
+            message_id="1",
+            chat_id="group:456",
+            sender_id="1001",
+            sender_name="1001",
+            sender_nickname="Alice",
+            sender_card="AliceCard",
+            is_from_self=False,
+            content="a",
+        ),
+        MessageEntry(
+            message_id="2",
+            chat_id="group:456",
+            sender_id="1002",
+            sender_name="1002",
+            sender_nickname="Bob",
+            is_from_self=False,
+            content="b",
+        ),
+        MessageEntry(
+            message_id="3",
+            chat_id="group:456",
+            sender_id="1003",
+            sender_name="1003",
+            is_from_self=False,
+            content="c",
+        ),
+    ]
+
+    serialized = serialize_chat_entries("group:456", entries, self_id=None)
+
+    assert serialized is not None
+    assert "U|u0|1001|AliceCard" in serialized.text
+    assert "U|u1|1002|Bob" in serialized.text
+    assert "U|u2|1003|1003" in serialized.text
+
+
+
 def test_serialize_buffer_chat_is_incremental_until_ack() -> None:
     """Unread entries should repeat until acknowledged, then only new ones remain."""
     buffer = Buffer(max_messages=10)
@@ -235,3 +307,54 @@ def test_mark_chat_entries_consumed_requires_unread_prefix() -> None:
         for entry in buffer.get_unconsumed_chat_entries("private:123")
     ]
     assert unread_ids == ["1", "2", "3"]
+
+
+
+def test_serialize_transcription_text_stays_in_message_body() -> None:
+    """Voice transcription text should serialize as plain M-body text."""
+    serialized = serialize_chat_entries(
+        "private:123",
+        [
+            MessageEntry(
+                message_id="9002001",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="[transcription: 今晚八点开会]",
+            )
+        ],
+        self_id="42",
+    )
+
+    assert serialized is not None
+    assert "I|" not in serialized.text
+    assert "M|9002001|peer|[transcription: 今晚八点开会]" in serialized.text
+
+
+
+def test_serialize_image_and_transcription_without_audio_rows() -> None:
+    """Mixed image and transcription content should only emit image rows."""
+    serialized = serialize_chat_entries(
+        "private:123",
+        [
+            MessageEntry(
+                message_id="9002002",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="看下这个 [image] [transcription: 收到语音]",
+                media=["file:///tmp/sample-image.png"],
+            )
+        ],
+        self_id="42",
+    )
+
+    assert serialized is not None
+    assert serialized.text.count("I|") == 1
+    assert "I|i0|sample-image.png" in serialized.text
+    assert (
+        "M|9002002|peer|看下这个 [i0] [transcription: 收到语音]"
+        in serialized.text
+    )

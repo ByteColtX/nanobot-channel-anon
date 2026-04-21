@@ -165,6 +165,30 @@ def _find_action(
     return next(item for item in server.actions if item["action"] == action_name)
 
 
+class FakeDownloadResponse:
+    """Minimal aiohttp-like response stub for media download tests."""
+
+    def __init__(self, body: bytes) -> None:
+        """Store the response body returned by read()."""
+        self._body = body
+
+    async def __aenter__(self) -> FakeDownloadResponse:
+        """Enter the async context manager."""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        """Exit the async context manager."""
+        del exc_type, exc, tb
+
+    def raise_for_status(self) -> None:
+        """Pretend the response status is successful."""
+        return None
+
+    async def read(self) -> bytes:
+        """Return the configured response body."""
+        return self._body
+
+
 def test_start_requires_url() -> None:
     """start() should reject an empty WebSocket URL."""
 
@@ -474,7 +498,7 @@ def test_reader_writes_private_message_to_cache_file(
             assert inbound.content == "\n".join(
                 [
                     "<CQMSG/1 bot:me n:1>",
-                    "U|me|42|42|bot",
+                    "U|me|42|anon-bot|bot",
                     "U|peer|123|123",
                     "M|7000|peer|hello",
                     "</CQMSG/1>",
@@ -1874,6 +1898,340 @@ def test_oversized_private_image_inbound_keeps_placeholder_only(
     monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
     asyncio.run(case())
     assert calls == []
+
+
+
+def test_allowed_private_voice_inbound_downloads_and_transcribes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Allowlisted voice inbound should download once and render transcription."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+                "media_max_size_mb": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9301",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "record",
+                            "data": {
+                                "file": "hello.amr",
+                                "url": "https://example.com/hello.amr",
+                                "file_size": "5",
+                            },
+                        }
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            media_path = tmp_path / "media" / "hello.amr"
+            assert media_path.read_bytes() == b"voice"
+            buffered = channel._buffer.get("private:123", "9301")
+            assert buffered is not None
+            assert buffered.content == "[transcription: 今晚八点开会]"
+            assert buffered.media == []
+            assert (
+                buffered.metadata["media_items"][0]["local_file_uri"]
+                == channel._file_uri(media_path)
+            )
+            assert (
+                buffered.metadata["media_items"][0]["transcription_text"]
+                == "今晚八点开会"
+            )
+            assert "I|" not in inbound.content
+            assert "M|9301|peer|[transcription: 今晚八点开会]" in inbound.content
+        finally:
+            await _stop_channel(channel, task, server)
+
+    download_calls: list[str] = []
+    transcribe_calls: list[Path] = []
+
+    def fake_get(
+        self: aiohttp.ClientSession,
+        url: str,
+        **kwargs: Any,
+    ) -> FakeDownloadResponse:
+        del self, kwargs
+        download_calls.append(url)
+        return FakeDownloadResponse(b"voice")
+
+    async def fake_transcribe(self: AnonChannel, file_path: str | Path) -> str:
+        del self
+        transcribe_calls.append(Path(file_path))
+        return "今晚八点开会"
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    monkeypatch.setattr(AnonChannel, "transcribe_audio", fake_transcribe)
+    asyncio.run(case())
+    assert download_calls == ["https://example.com/hello.amr"]
+    assert transcribe_calls == [tmp_path / "media" / "hello.amr"]
+
+
+
+def test_disallowed_private_voice_inbound_skips_download_and_transcription(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Blocked sessions should return before any voice processing happens."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["999"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9302",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "record",
+                            "data": {
+                                "file": "blocked.amr",
+                                "url": "https://example.com/blocked.amr",
+                                "file_size": "5",
+                            },
+                        }
+                    ],
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            assert channel._buffer.get("private:123", "9302") is None
+            assert not (tmp_path / "media" / "blocked.amr").exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    download_calls: list[str] = []
+    transcribe_calls: list[Path] = []
+
+    def fake_get(self: aiohttp.ClientSession, url: str, **kwargs: Any) -> Any:
+        del self, kwargs
+        download_calls.append(url)
+        raise AssertionError("download should not happen")
+
+    async def fake_transcribe(self: AnonChannel, file_path: str | Path) -> str:
+        del self
+        transcribe_calls.append(Path(file_path))
+        raise AssertionError("transcription should not happen")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    monkeypatch.setattr(AnonChannel, "transcribe_audio", fake_transcribe)
+    asyncio.run(case())
+    assert download_calls == []
+    assert transcribe_calls == []
+
+
+
+def test_cached_private_voice_inbound_skips_redownload_but_still_transcribes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cached voice files should be reused without another fetch."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    cached_file = media_dir / "cached.amr"
+    cached_file.write_bytes(b"cached")
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+                "media_max_size_mb": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9303",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "record",
+                            "data": {
+                                "file": "cached.amr",
+                                "url": "https://example.com/cached.amr",
+                                "file_size": "999999",
+                            },
+                        }
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            buffered = channel._buffer.get("private:123", "9303")
+            assert buffered is not None
+            assert buffered.content == "[transcription: 已命中缓存]"
+            assert buffered.media == []
+            assert (
+                buffered.metadata["media_items"][0]["local_file_uri"]
+                == channel._file_uri(cached_file)
+            )
+            assert inbound.metadata["cqmsg_message_ids"] == ["9303"]
+            assert cached_file.read_bytes() == b"cached"
+        finally:
+            await _stop_channel(channel, task, server)
+
+    download_calls: list[str] = []
+    transcribe_calls: list[Path] = []
+
+    def fake_get(self: aiohttp.ClientSession, url: str, **kwargs: Any) -> Any:
+        del self, kwargs
+        download_calls.append(url)
+        raise AssertionError("download should be skipped for cache hit")
+
+    async def fake_transcribe(self: AnonChannel, file_path: str | Path) -> str:
+        del self
+        transcribe_calls.append(Path(file_path))
+        return "已命中缓存"
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    monkeypatch.setattr(AnonChannel, "transcribe_audio", fake_transcribe)
+    asyncio.run(case())
+    assert download_calls == []
+    assert transcribe_calls == [cached_file]
+
+
+
+def test_oversized_private_voice_inbound_keeps_placeholder_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Oversized voice messages should not download or transcribe."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+                "media_max_size_mb": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9304",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "record",
+                            "data": {
+                                "file": "big.amr",
+                                "url": "https://example.com/big.amr",
+                                "file_size": str(2 * 1024 * 1024),
+                            },
+                        }
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            buffered = channel._buffer.get("private:123", "9304")
+            assert buffered is not None
+            assert buffered.content == "[voice]"
+            assert buffered.media == []
+            assert "I|" not in inbound.content
+            assert "M|9304|peer|[voice]" in inbound.content
+            assert not (tmp_path / "media" / "big.amr").exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    download_calls: list[str] = []
+    transcribe_calls: list[Path] = []
+
+    def fake_get(self: aiohttp.ClientSession, url: str, **kwargs: Any) -> Any:
+        del self, kwargs
+        download_calls.append(url)
+        raise AssertionError("download should not happen for oversized voice")
+
+    async def fake_transcribe(self: AnonChannel, file_path: str | Path) -> str:
+        del self
+        transcribe_calls.append(Path(file_path))
+        raise AssertionError("transcription should not happen for oversized voice")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    monkeypatch.setattr(AnonChannel, "transcribe_audio", fake_transcribe)
+    asyncio.run(case())
+    assert download_calls == []
+    assert transcribe_calls == []
 
 
 

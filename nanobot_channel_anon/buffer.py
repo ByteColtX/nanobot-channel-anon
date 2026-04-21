@@ -16,6 +16,8 @@ class ForwardNodeEntry:
     sender_name: str
     source_chat_id: str | None
     content: str
+    sender_nickname: str = ""
+    sender_card: str = ""
     message_id: str | None = None
     media: list[str] = field(default_factory=list)
     reply_to_message_id: str | None = None
@@ -42,6 +44,8 @@ class MessageEntry:
     sender_name: str
     is_from_self: bool
     content: str
+    sender_nickname: str = ""
+    sender_card: str = ""
     media: list[str] = field(default_factory=list)
     reply_to_message_id: str | None = None
     event_time: int | float | str | None = None

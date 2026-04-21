@@ -304,6 +304,198 @@ def test_process_inbound_candidate_downloads_images() -> None:
 
 
 
+def test_process_inbound_candidate_transcribes_voice() -> None:
+    """Inbound processing should replace [voice] with transcription text."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "message_id": "698",
+            "user_id": "123",
+            "message": [
+                {
+                    "type": "record",
+                    "data": {
+                        "file": "hello.amr",
+                        "url": "https://example.com/hello.amr",
+                        "file_size": "123",
+                    },
+                }
+            ],
+        }
+    )
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+    assert candidate is not None
+    assert candidate.content == "[voice]"
+
+    seen_items: list[dict[str, str]] = []
+
+    async def _process_voice(item: dict[str, str]) -> dict[str, str] | None:
+        seen_items.append(dict(item))
+        return {
+            "local_file_uri": "file:///tmp/hello.amr",
+            "transcription_text": "今晚八点开会",
+        }
+
+    async def _resolve_empty_forward(_forward_id: str) -> object:
+        return {"messages": []}
+
+    processed = asyncio.run(
+        process_inbound_candidate(
+            candidate,
+            buffer=Buffer(max_messages=10),
+            forward_resolver=_resolve_empty_forward,
+            voice_processor=_process_voice,
+        )
+    )
+
+    assert processed.candidate.content == "[transcription: 今晚八点开会]"
+    assert processed.candidate.media == []
+    assert processed.candidate.metadata["media_items"] == [
+        {
+            "type": "record",
+            "file": "hello.amr",
+            "url": "https://example.com/hello.amr",
+            "file_size": "123",
+            "local_file_uri": "file:///tmp/hello.amr",
+            "transcription_text": "今晚八点开会",
+        }
+    ]
+    assert seen_items == [
+        {
+            "type": "record",
+            "file": "hello.amr",
+            "url": "https://example.com/hello.amr",
+            "file_size": "123",
+        }
+    ]
+
+
+
+def test_process_inbound_candidate_keeps_voice_placeholder_when_transcription_fails(
+) -> None:
+    """Inbound processing should keep [voice] when voice processing yields no text."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "message_id": "697",
+            "user_id": "123",
+            "message": [
+                {
+                    "type": "record",
+                    "data": {
+                        "file": "hello.amr",
+                        "url": "https://example.com/hello.amr",
+                        "file_size": "123",
+                    },
+                }
+            ],
+        }
+    )
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+    assert candidate is not None
+
+    async def _process_voice(_item: dict[str, str]) -> dict[str, str] | None:
+        return {"local_file_uri": "file:///tmp/hello.amr"}
+
+    async def _resolve_empty_forward(_forward_id: str) -> object:
+        return {"messages": []}
+
+    processed = asyncio.run(
+        process_inbound_candidate(
+            candidate,
+            buffer=Buffer(max_messages=10),
+            forward_resolver=_resolve_empty_forward,
+            voice_processor=_process_voice,
+        )
+    )
+
+    assert processed.candidate.content == "[voice]"
+    assert processed.candidate.metadata["media_items"] == [
+        {
+            "type": "record",
+            "file": "hello.amr",
+            "url": "https://example.com/hello.amr",
+            "file_size": "123",
+            "local_file_uri": "file:///tmp/hello.amr",
+        }
+    ]
+
+
+
+def test_process_inbound_candidate_replaces_multiple_voice_placeholders_in_order(
+) -> None:
+    """Voice placeholder replacement should follow record segment order."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "message_id": "696",
+            "user_id": "123",
+            "message": [
+                {"type": "text", "data": {"text": "前"}},
+                {
+                    "type": "record",
+                    "data": {
+                        "file": "a.amr",
+                        "url": "https://example.com/a.amr",
+                        "file_size": "123",
+                    },
+                },
+                {"type": "text", "data": {"text": "中"}},
+                {
+                    "type": "record",
+                    "data": {
+                        "file": "b.amr",
+                        "url": "https://example.com/b.amr",
+                        "file_size": "456",
+                    },
+                },
+                {"type": "text", "data": {"text": "后"}},
+            ],
+        }
+    )
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+    assert candidate is not None
+    assert candidate.content == "前[voice]中[voice]后"
+
+    transcripts = iter(("第一条", "第二条"))
+
+    async def _process_voice(_item: dict[str, str]) -> dict[str, str] | None:
+        return {"transcription_text": next(transcripts)}
+
+    async def _resolve_empty_forward(_forward_id: str) -> object:
+        return {"messages": []}
+
+    processed = asyncio.run(
+        process_inbound_candidate(
+            candidate,
+            buffer=Buffer(max_messages=10),
+            forward_resolver=_resolve_empty_forward,
+            voice_processor=_process_voice,
+        )
+    )
+
+    assert (
+        processed.candidate.content
+        == "前[transcription: 第一条]中[transcription: 第二条]后"
+    )
+
+
+
 def test_process_inbound_candidate_expands_forward_and_cache_writes_message() -> None:
     """Inbound processing should expand forwards and let cache write the entry."""
     raw = OneBotRawEvent.model_validate(

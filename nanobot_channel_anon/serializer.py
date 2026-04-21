@@ -181,7 +181,7 @@ from nanobot_channel_anon.buffer import (
     ForwardNodeEntry,
     MessageEntry,
 )
-from nanobot_channel_anon.utils import parse_chat_id
+from nanobot_channel_anon.utils import parse_chat_id, string_value
 
 
 @dataclass(slots=True)
@@ -200,6 +200,7 @@ class _UserRow:
     qq: str
     name: str
     is_bot: bool = False
+    name_priority: int = -1
 
 
 @dataclass(slots=True)
@@ -215,10 +216,12 @@ class _CQMSGBuilder:
         chat_id: str,
         entries: list[MessageEntry],
         self_id: str | None,
+        self_nickname: str | None,
     ) -> None:
         self.chat_id = chat_id
         self.entries = entries
         self.self_id = self_id
+        self.self_nickname = self_nickname
         self.chat_kind, self.target_id = parse_chat_id(chat_id)
         self.is_private = self.chat_kind == "private"
         self._users: list[_UserRow] = []
@@ -268,12 +271,39 @@ class _CQMSGBuilder:
         return f"<CQMSG/1 g:{self.target_id} bot:{bot_uid} n:{len(self.entries)}>"
 
     def _ensure_bot_user(self) -> str:
-        return self._ensure_user(self.self_id, self.self_id or "", is_bot=True)
+        return self._ensure_user(
+            self.self_id,
+            self.self_id or "",
+            sender_nickname=self.self_nickname or "",
+            is_bot=True,
+        )
+
+    def _display_name_priority(
+        self,
+        *,
+        sender_name: str,
+        sender_nickname: str = "",
+        sender_card: str = "",
+    ) -> tuple[str, int]:
+        sender_id_like = string_value(sender_name) or ""
+        nickname = string_value(sender_nickname)
+        card = string_value(sender_card)
+        if self.is_private:
+            if nickname is not None:
+                return nickname, 1
+            return sender_id_like, 0
+        if card is not None:
+            return card, 2
+        if nickname is not None:
+            return nickname, 1
+        return sender_id_like, 0
 
     def _resolve_message_sender_uid(self, entry: MessageEntry) -> str:
         return self._ensure_user(
             entry.sender_id,
             entry.sender_name,
+            sender_nickname=entry.sender_nickname,
+            sender_card=entry.sender_card,
             is_bot=entry.is_from_self,
         )
 
@@ -303,7 +333,12 @@ class _CQMSGBuilder:
     def _collect_forward_users(self, forwards: list[ForwardEntry]) -> None:
         for forward in forwards:
             for node in forward.nodes:
-                self._ensure_user(node.sender_id, node.sender_name)
+                self._ensure_user(
+                    node.sender_id,
+                    node.sender_name,
+                    sender_nickname=node.sender_nickname,
+                    sender_card=node.sender_card,
+                )
 
     def _render_forward_container(self, fid: str, forward: ForwardEntry) -> str:
         row = ["F", fid, str(len(forward.nodes))]
@@ -318,7 +353,12 @@ class _CQMSGBuilder:
         node: ForwardNodeEntry,
         message_id_to_ref: dict[str, str],
     ) -> str:
-        sender_uid = self._ensure_user(node.sender_id, node.sender_name)
+        sender_uid = self._ensure_user(
+            node.sender_id,
+            node.sender_name,
+            sender_nickname=node.sender_nickname,
+            sender_card=node.sender_card,
+        )
         body = self._replace_media_placeholders(node.content, node.media)
         reply_ref = message_id_to_ref.get(node.reply_to_message_id or "")
         if reply_ref:
@@ -349,15 +389,27 @@ class _CQMSGBuilder:
         sender_id: str | None,
         sender_name: str,
         *,
+        sender_nickname: str = "",
+        sender_card: str = "",
         is_bot: bool = False,
     ) -> str:
         normalized_sender_id = sender_id or ""
+        display_name, display_priority = self._display_name_priority(
+            sender_name=sender_name or normalized_sender_id,
+            sender_nickname=sender_nickname,
+            sender_card=sender_card,
+        )
         key = (normalized_sender_id, is_bot)
         existing_uid = self._user_uids.get(key)
         if existing_uid is not None:
             existing_row = self._user_rows[key]
-            if sender_name and existing_row.name == normalized_sender_id:
-                existing_row.name = sender_name
+            if display_priority > existing_row.name_priority or (
+                display_priority == existing_row.name_priority
+                and existing_row.name == normalized_sender_id
+                and display_name != normalized_sender_id
+            ):
+                existing_row.name = display_name
+                existing_row.name_priority = display_priority
             return existing_uid
 
         if self.is_private:
@@ -379,8 +431,9 @@ class _CQMSGBuilder:
         user = _UserRow(
             uid=uid,
             qq=normalized_sender_id,
-            name=sender_name or normalized_sender_id,
+            name=display_name,
             is_bot=is_bot,
+            name_priority=display_priority,
         )
         self._users.append(user)
         self._user_rows[key] = user
@@ -432,11 +485,17 @@ def serialize_chat_entries(
     entries: list[MessageEntry],
     *,
     self_id: str | None,
+    self_nickname: str | None = None,
 ) -> SerializedCQMessage | None:
     """Serialize buffered chat entries into one CQMSG block."""
     if not entries:
         return None
-    return _CQMSGBuilder(chat_id=chat_id, entries=entries, self_id=self_id).build()
+    return _CQMSGBuilder(
+        chat_id=chat_id,
+        entries=entries,
+        self_id=self_id,
+        self_nickname=self_nickname,
+    ).build()
 
 
 def serialize_buffer_chat(
@@ -444,10 +503,12 @@ def serialize_buffer_chat(
     chat_id: str,
     *,
     self_id: str | None,
+    self_nickname: str | None = None,
 ) -> SerializedCQMessage | None:
     """Serialize unread buffered chat entries into one CQMSG block."""
     return serialize_chat_entries(
         chat_id,
         buffer.get_unconsumed_chat_entries(chat_id),
         self_id=self_id,
+        self_nickname=self_nickname,
     )
