@@ -1,9 +1,11 @@
 """Anon channel configuration."""
 
-from typing import Self
+from typing import Any, Self
 
 from nanobot.config.schema import Base
 from pydantic import Field, field_validator, model_validator
+
+from nanobot_channel_anon.utils import normalize_onebot_id
 
 
 class AnonConfig(Base):
@@ -27,6 +29,13 @@ class AnonConfig(Base):
     allow_from: list[str] = Field(
         default_factory=list,
         description='Allowed sender or group IDs. ["*"] allows all, [] denies all.',
+    )
+    super_admins: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Allowed sender IDs for admin-only slash commands. "
+            "Empty means all high-risk slash commands are denied."
+        ),
     )
     private_trigger_prob: float = Field(
         default=0.85,
@@ -91,6 +100,27 @@ class AnonConfig(Base):
     def strip_access_token(cls, value: str) -> str:
         """Strip surrounding whitespace from the access token."""
         return value.strip()
+
+    @field_validator("super_admins", mode="before")
+    @classmethod
+    def normalize_super_admins(cls, value: Any) -> list[str]:
+        """Normalize super admin sender IDs."""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("super_admins must be a list of sender IDs")
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            admin_id = normalize_onebot_id(item)
+            if admin_id is None:
+                continue
+            if admin_id in seen:
+                continue
+            seen.add(admin_id)
+            normalized.append(admin_id)
+        return normalized
 
     @model_validator(mode="after")
     def validate_enabled_config(self) -> Self:

@@ -321,6 +321,30 @@ class AnonChannel(BaseChannel):
             self._self_nickname,
         )
 
+    @staticmethod
+    def _extract_slash_command(candidate: Any) -> str | None:
+        """Extract a normalized slash command name from inbound content."""
+        event_kind = getattr(candidate, "event_kind", None)
+        if event_kind not in {"private_message", "group_message"}:
+            return None
+
+        content = getattr(candidate, "content", "")
+        if not isinstance(content, str):
+            return None
+        text = content.lstrip()
+        if not text.startswith("/"):
+            return None
+
+        command_text = text[1:].strip()
+        if not command_text:
+            return None
+        command = command_text.split(maxsplit=1)[0].lower()
+        return command or None
+
+    def _is_super_admin(self, sender_id: str) -> bool:
+        """Return whether the sender can use admin-only slash commands."""
+        return sender_id in self.config.super_admins
+
     async def _handle_inbound_event(self, payload: OneBotRawEvent) -> None:
         candidate = normalize_inbound_event(
             payload,
@@ -359,6 +383,23 @@ class AnonChannel(BaseChannel):
             )
             return
 
+        slash_command = self._extract_slash_command(candidate)
+        candidate.metadata["slash_command"] = slash_command
+        if (
+            slash_command is not None
+            and slash_command != "status"
+            and not self._is_super_admin(candidate.sender_id)
+        ):
+            logger.warning(
+                "Admin-only slash command denied for sender {} in chat {} "
+                "on channel {}: /{}",
+                candidate.sender_id,
+                candidate.chat_id,
+                self.name,
+                slash_command,
+            )
+            return
+
         try:
             processed = await process_inbound_candidate(
                 candidate,
@@ -371,7 +412,12 @@ class AnonChannel(BaseChannel):
             logger.warning("Anon inbound processing failed: {}", exc)
             return
         candidate = processed.candidate
-        routed = self._router.route(candidate)
+        slash_command = candidate.metadata.get("slash_command")
+        if slash_command == "status":
+            candidate.metadata["trigger_reason"] = "slash_status"
+            routed = candidate
+        else:
+            routed = self._router.route(candidate)
         cache_inbound_candidate(
             candidate,
             buffer=self._buffer,

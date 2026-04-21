@@ -1559,6 +1559,228 @@ def test_allowlisted_inbound_is_cached_without_publish(
     asyncio.run(case())
 
 
+@pytest.mark.parametrize("raw_message", ["/status", "   /STATUS   "])
+def test_status_slash_bypasses_private_probability(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raw_message: str,
+) -> None:
+    """/status should publish even when private routing would drop it."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 0.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9301",
+                    "user_id": "123",
+                    "raw_message": raw_message,
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            metadata = snapshot["private:123"][0]["metadata"]
+            assert metadata["trigger_reason"] == "slash_status"
+            assert metadata["slash_command"] == "status"
+            assert inbound.metadata["trigger_reason"] == "slash_status"
+            assert inbound.metadata["slash_command"] == "status"
+            assert inbound.metadata["cqmsg_message_ids"] == ["9301"]
+            assert channel._buffer.get_unconsumed_chat_entries("private:123") == []
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_non_admin_slash_command_is_rejected_before_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-admin slash commands should stop before cache and publish."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9302",
+                    "user_id": "123",
+                    "raw_message": "/restart",
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            assert channel._buffer.get("private:123", "9302") is None
+            assert not channel._inbound_cache_path.exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_admin_slash_command_respects_existing_private_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admin-only slash commands should still obey existing private routing."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "super_admins": [" 123 ", "123", None],
+                "private_trigger_prob": 0.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9303",
+                    "user_id": "123",
+                    "raw_message": "/restart",
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            buffered = channel._buffer.get("private:123", "9303")
+            assert buffered is not None
+            assert buffered.content == "/restart"
+            assert channel.config.super_admins == ["123"]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_super_admin_does_not_bypass_allow_from(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """super_admins should not override the existing allow_from gate."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["999"],
+                "super_admins": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9304",
+                    "user_id": "123",
+                    "raw_message": "/restart",
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            assert channel._buffer.get("private:123", "9304") is None
+            assert not channel._inbound_cache_path.exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_statusx_does_not_get_status_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the exact /status command should bypass routing."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "super_admins": ["123"],
+                "private_trigger_prob": 0.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9305",
+                    "user_id": "123",
+                    "raw_message": "/statusx",
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            buffered = channel._buffer.get("private:123", "9305")
+            assert buffered is not None
+            assert buffered.content == "/statusx"
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
 def test_routed_poke_falls_back_to_raw_inbound_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
