@@ -1153,6 +1153,143 @@ def test_send_buffers_outbound_message_id(monkeypatch: pytest.MonkeyPatch) -> No
     asyncio.run(case())
 
 
+def test_send_suppresses_known_fallback_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Known nanobot fallback text should not be sent to OneBot."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        messages: list[str] = []
+        sink_id = channel_module.logger.add(
+            lambda message: messages.append(str(message)),
+            level="DEBUG",
+            format="{level}|{message}",
+        )
+        server = OneBotWebSocketServer()
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(
+                    channel="anon",
+                    chat_id="private:1",
+                    content=(
+                        "I completed the tool steps but couldn't produce a "
+                        "final answer. Please try again or narrow the task."
+                    ),
+                )
+            )
+            await asyncio.sleep(0.05)
+            assert not any(
+                action["action"] == "send_private_msg" for action in server.actions
+            )
+            assert channel._buffer.get_chat_entries("private:1") == []
+            assert any(
+                "DEBUG|Suppressing outbound nanobot fallback for private:1: "
+                "empty_final_response" in msg
+                for msg in messages
+            )
+        finally:
+            channel_module.logger.remove(sink_id)
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_suppresses_error_prefix_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Error:-prefixed outbound text should not be sent to OneBot."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(
+                    channel="anon",
+                    chat_id="group:2",
+                    content="Error: Task interrupted before a response was generated.",
+                )
+            )
+            await asyncio.sleep(0.05)
+            assert not any(
+                action["action"] == "send_group_msg" for action in server.actions
+            )
+            assert channel._buffer.get_chat_entries("group:2") == []
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_delta_suppresses_background_task_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """send_delta() should reuse suppression rules from send()."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send_delta("private:1", "Background task completed.")
+            await asyncio.sleep(0.05)
+            assert not any(
+                action["action"] == "send_private_msg" for action in server.actions
+            )
+            assert channel._buffer.get_chat_entries("private:1") == []
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_allows_restart_status_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Slash-command status text should still be sent."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(
+                    channel="anon",
+                    chat_id="private:1",
+                    content="Restarting...",
+                )
+            )
+            action = _find_action(server, "send_private_msg")
+            assert action["params"] == {
+                "user_id": 1,
+                "message": [{"type": "text", "data": {"text": "Restarting..."}}],
+            }
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
 def test_group_reply_only_triggers_for_bot_message(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

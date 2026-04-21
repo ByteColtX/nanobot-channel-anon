@@ -26,7 +26,10 @@ from nanobot_channel_anon.inbound import (
     process_inbound_candidate,
 )
 from nanobot_channel_anon.onebot import BotStatus, OneBotAPIRequest, OneBotRawEvent
-from nanobot_channel_anon.outbound import build_send_request
+from nanobot_channel_anon.outbound import (
+    build_send_request,
+    get_suppressed_outbound_reason,
+)
 from nanobot_channel_anon.router import InboundRouter
 from nanobot_channel_anon.serializer import serialize_buffer_chat
 from nanobot_channel_anon.utils import (
@@ -153,6 +156,13 @@ class AnonChannel(BaseChannel):
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through the active OneBot WebSocket."""
+        if reason := get_suppressed_outbound_reason(msg.content):
+            logger.debug(
+                "Suppressing outbound nanobot fallback for {}: {}",
+                msg.chat_id,
+                reason,
+            )
+            return
         action, params = build_send_request(
             msg.chat_id,
             msg.content,

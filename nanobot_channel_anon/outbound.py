@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
@@ -12,6 +13,20 @@ from nanobot_channel_anon.utils import parse_chat_id
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 _AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"}
+_SUPPRESSED_OUTBOUND_TEXT_REASONS = {
+    (
+        "I completed the tool steps but couldn't produce a final answer. "
+        "Please try again or narrow the task."
+    ): "empty_final_response",
+    "Sorry, I encountered an error calling the AI model.": "model_error",
+    "Sorry, I encountered an error.": "generic_error",
+    "Task completed but no final response was generated.": "missing_final_response",
+    "Background task completed.": "background_task_completed",
+}
+_MAX_ITERATIONS_PATTERN = re.compile(
+    r"^I reached the maximum number of tool call iterations \(\d+\) without "
+    r"completing the task\. You can try breaking the task into smaller steps\.$"
+)
 
 
 def build_send_request(
@@ -30,6 +45,21 @@ def build_send_request(
         id_key: target_id,
         "message": [segment.model_dump(exclude_none=True) for segment in segments],
     }
+
+
+def get_suppressed_outbound_reason(content: str) -> str | None:
+    """Return the suppression reason for known nanobot fallback/error text."""
+    normalized = content.strip()
+    if not normalized:
+        return None
+    if normalized.startswith("Error:"):
+        return "error_prefix"
+    reason = _SUPPRESSED_OUTBOUND_TEXT_REASONS.get(normalized)
+    if reason is not None:
+        return reason
+    if _MAX_ITERATIONS_PATTERN.fullmatch(normalized):
+        return "max_iterations"
+    return None
 
 
 def build_message_segments(
