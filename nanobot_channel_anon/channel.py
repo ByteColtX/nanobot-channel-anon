@@ -37,6 +37,17 @@ _READ_TIMEOUT_S = 60.0
 _API_TIMEOUT_S = 5.0
 _RECONNECT_INTERVAL_S = 5.0
 _INBOUND_CACHE_PATH = Path(".anon_inbound_buffer.json")
+_SUPPORTED_TRANSCRIPTION_SUFFIXES = {
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".mpga",
+    ".ogg",
+    ".wav",
+    ".webm",
+}
 
 
 class AnonChannel(BaseChannel):
@@ -387,7 +398,6 @@ class AnonChannel(BaseChannel):
         media = list(routed.media)
         if serialized is not None:
             content = serialized.text
-            media = []
             metadata["cqmsg_message_ids"] = list(serialized.message_ids)
             metadata["cqmsg_count"] = serialized.count
 
@@ -607,7 +617,7 @@ class AnonChannel(BaseChannel):
         local_file = await self._download_inbound_media(media_item)
         if local_file is None:
             return None
-        return self._file_uri(local_file)
+        return str(local_file.resolve(strict=False))
 
     async def _process_inbound_voice(
         self,
@@ -618,10 +628,68 @@ class AnonChannel(BaseChannel):
             return None
 
         result = {"local_file_uri": self._file_uri(local_file)}
-        transcription_text = (await self.transcribe_audio(local_file)).strip()
+        transcription_file = await self._transcode_voice_for_transcription(local_file)
+        if transcription_file is None:
+            return result
+        if transcription_file != local_file:
+            result["transcription_local_file_uri"] = self._file_uri(
+                transcription_file
+            )
+            with contextlib.suppress(FileNotFoundError):
+                local_file.unlink()
+
+        transcription_text = (await self.transcribe_audio(transcription_file)).strip()
         if transcription_text:
             result["transcription_text"] = transcription_text
         return result
+
+    async def _transcode_voice_for_transcription(
+        self,
+        source_path: Path,
+    ) -> Path | None:
+        suffix = source_path.suffix.lower()
+        if suffix in _SUPPORTED_TRANSCRIPTION_SUFFIXES:
+            return source_path
+
+        target_path = source_path.with_suffix(".wav")
+        if target_path.exists():
+            return target_path
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(source_path),
+                "-vn",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                str(target_path),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            logger.warning(
+                "Anon failed to start ffmpeg for voice transcription: {}",
+                exc,
+            )
+            return None
+
+        _, stderr = await process.communicate()
+        if process.returncode != 0:
+            with contextlib.suppress(FileNotFoundError):
+                target_path.unlink()
+            logger.warning(
+                "Anon voice transcoding failed for {}: {}",
+                source_path,
+                stderr.decode("utf-8", errors="ignore").strip(),
+            )
+            return None
+        return target_path
 
     async def _download_inbound_media(self, media_item: dict[str, Any]) -> Path | None:
         file_name = str(media_item.get("file") or "").strip()

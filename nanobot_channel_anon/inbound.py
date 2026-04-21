@@ -248,6 +248,12 @@ async def _process_candidate_voices(
             if local_file_uri is not None:
                 item["local_file_uri"] = local_file_uri
 
+            transcription_local_file_uri = string_value(
+                result.get("transcription_local_file_uri")
+            )
+            if transcription_local_file_uri is not None:
+                item["transcription_local_file_uri"] = transcription_local_file_uri
+
             transcription_text = string_value(result.get("transcription_text"))
             if transcription_text is not None:
                 item["transcription_text"] = transcription_text
