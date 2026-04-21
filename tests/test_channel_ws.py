@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -425,8 +426,11 @@ def test_fetch_self_id_supports_wrapped_and_flat_payloads(
     asyncio.run(case())
 
 
-def test_reader_publishes_private_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A triggered private message should be published to the inbound bus."""
+def test_reader_writes_private_message_to_cache_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A triggered private message should be written to the cache file only."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def case() -> None:
@@ -441,6 +445,7 @@ def test_reader_publishes_private_message(monkeypatch: pytest.MonkeyPatch) -> No
             },
             bus,
         )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._ws is not None)
@@ -448,23 +453,34 @@ def test_reader_publishes_private_message(monkeypatch: pytest.MonkeyPatch) -> No
                 {
                     "post_type": "message",
                     "message_type": "private",
+                    "message_id": "7000",
                     "user_id": "123",
                     "raw_message": "hello",
                 }
             )
-            inbound = await _consume_inbound(bus)
-            assert inbound.sender_id == "123"
-            assert inbound.chat_id == "private:123"
-            assert inbound.content == "hello"
-            assert inbound.metadata["trigger_reason"] == "private_prob"
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            assert snapshot["private:123"][0]["sender_id"] == "123"
+            assert snapshot["private:123"][0]["content"] == "hello"
+            assert (
+                snapshot["private:123"][0]["metadata"]["trigger_reason"]
+                == "private_prob"
+            )
         finally:
             await _stop_channel(channel, task, server)
 
     asyncio.run(case())
 
 
-def test_reader_keeps_forward_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Forward segments should stay as placeholders in published content."""
+def test_reader_keeps_forward_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Forward segments should stay as placeholders in cached content."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def case() -> None:
@@ -479,6 +495,7 @@ def test_reader_keeps_forward_placeholder(monkeypatch: pytest.MonkeyPatch) -> No
             },
             bus,
         )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._ws is not None)
@@ -515,11 +532,21 @@ def test_reader_keeps_forward_placeholder(monkeypatch: pytest.MonkeyPatch) -> No
                     ],
                 }
             )
-            inbound = await _consume_inbound(bus)
-            assert inbound.content == "看看[forward]"
-            assert inbound.metadata["forward_refs"][0]["forward_id"] == "fwd-1"
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            assert snapshot["private:123"][0]["content"] == "看看[forward]"
             assert (
-                inbound.metadata["expanded_forwards"][0]["nodes"][0]["content"]
+                snapshot["private:123"][0]["metadata"]["forward_refs"][0]
+                ["forward_id"]
+                == "fwd-1"
+            )
+            assert (
+                snapshot["private:123"][0]["expanded_forwards"][0]["nodes"][0]
+                ["content"]
                 == "hello"
             )
             buffered = channel._buffer.get("private:123", "700")
@@ -570,7 +597,10 @@ def test_reader_drops_disallowed_sender_before_publish(
     asyncio.run(case())
 
 
-def test_reader_fetches_forward_content_by_id(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reader_fetches_forward_content_by_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Forward IDs should be expanded through get_forward_msg before buffering."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
@@ -615,6 +645,7 @@ def test_reader_fetches_forward_content_by_id(monkeypatch: pytest.MonkeyPatch) -
             },
             bus,
         )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._ws is not None)
@@ -630,14 +661,196 @@ def test_reader_fetches_forward_content_by_id(monkeypatch: pytest.MonkeyPatch) -
                     ],
                 }
             )
-            inbound = await _consume_inbound(bus)
-            assert inbound.content == "看看[forward]"
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            assert snapshot["private:123"][0]["content"] == "看看[forward]"
             assert (
-                inbound.metadata["expanded_forwards"][0]["nodes"][0]["content"]
+                snapshot["private:123"][0]["metadata"]["expanded_forwards"][0]
+                ["nodes"][0]["content"]
                 == "forwarded"
             )
             assert _find_action(server, "get_forward_msg")["params"] == {"id": "fwd-2"}
         finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_reader_marks_get_forward_msg_failure_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Failed get_forward_msg responses should be treated as unresolved forwards."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") != "get_forward_msg":
+            return
+        await ws.send_json(
+            {
+                "status": "failed",
+                "retcode": 200,
+                "data": None,
+                "message": "消息已过期或者为内层消息,无法获取转发消息",
+                "wording": "消息已过期或者为内层消息,无法获取转发消息",
+                "echo": payload["echo"],
+                "stream": "normal-action",
+            }
+        )
+
+    async def case() -> None:
+        messages: list[str] = []
+        sink_id = channel_module.logger.add(
+            lambda message: messages.append(str(message)),
+            level="DEBUG",
+            format="{level}|{message}",
+        )
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "702",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "text", "data": {"text": "看看"}},
+                        {"type": "forward", "data": {"id": "fwd-expired"}},
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            expanded = snapshot["private:123"][0]["metadata"]["expanded_forwards"][0]
+            assert expanded["forward_id"] == "fwd-expired"
+            assert expanded["unresolved"] is True
+            assert expanded["nodes"] == []
+            assert any(
+                "WARNING|Anon get_forward_msg returned failure:" in msg
+                for msg in messages
+            )
+            assert any(
+                (
+                    "status=failed retcode=200 "
+                    "message=消息已过期或者为内层消息,无法获取转发消息"
+                )
+                in msg
+                for msg in messages
+            )
+        finally:
+            channel_module.logger.remove(sink_id)
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_reader_marks_get_forward_msg_null_data_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Null get_forward_msg data should be treated as unresolved forwards."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") != "get_forward_msg":
+            return
+        await ws.send_json(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": None,
+                "message": "",
+                "wording": "",
+                "echo": payload["echo"],
+                "stream": "normal-action",
+            }
+        )
+
+    async def case() -> None:
+        messages: list[str] = []
+        sink_id = channel_module.logger.add(
+            lambda message: messages.append(str(message)),
+            level="DEBUG",
+            format="{level}|{message}",
+        )
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "703",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "text", "data": {"text": "看看"}},
+                        {"type": "forward", "data": {"id": "fwd-null"}},
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            expanded = snapshot["private:123"][0]["metadata"]["expanded_forwards"][0]
+            assert expanded["forward_id"] == "fwd-null"
+            assert expanded["unresolved"] is True
+            assert expanded["nodes"] == []
+            assert any(
+                (
+                    "WARNING|Anon get_forward_msg returned failure: "
+                    "status=ok retcode=0 message="
+                )
+                in msg
+                for msg in messages
+            )
+        finally:
+            channel_module.logger.remove(sink_id)
             await _stop_channel(channel, task, server)
 
     asyncio.run(case())
@@ -808,6 +1021,7 @@ def test_send_ignores_explicit_reply_fields(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_send_does_not_reply_to_last_inbound_message(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Inbound message IDs should not create implicit reply segments."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -832,6 +1046,7 @@ def test_send_does_not_reply_to_last_inbound_message(
             },
             bus,
         )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -844,7 +1059,9 @@ def test_send_does_not_reply_to_last_inbound_message(
                     "raw_message": "hello",
                 }
             )
-            await _consume_inbound(bus)
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
             await channel.send(
                 OutboundMessage(channel="anon", chat_id="private:123", content="reply")
             )
@@ -892,6 +1109,7 @@ def test_send_buffers_outbound_message_id(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_group_reply_only_triggers_for_bot_message(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Group reply trigger should require replying to a buffered bot message."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -916,6 +1134,7 @@ def test_group_reply_only_triggers_for_bot_message(
             },
             bus,
         )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -935,9 +1154,14 @@ def test_group_reply_only_triggers_for_bot_message(
                     ],
                 }
             )
-            inbound = await _consume_inbound(bus)
-            assert inbound.metadata["trigger_reason"] == "reply"
-            assert inbound.metadata["reply_target_from_self"] is True
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            assert snapshot["group:2"][0]["metadata"]["trigger_reason"] == "reply"
+            assert snapshot["group:2"][0]["metadata"]["reply_target_from_self"] is True
         finally:
             await _stop_channel(channel, task, server)
 

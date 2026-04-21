@@ -195,6 +195,15 @@ async def _expand_candidate_forwards(
     candidate: InboundCandidate,
     forward_resolver: ForwardResolver,
 ) -> list[ForwardEntry]:
+    """展开当前入站消息直接引用的合并转发.
+
+    当前只展开外层 forward 引用, 不递归展开转发节点内部再次出现的 forward。
+
+    NapCat `get_forward_msg` 返回的子消息 `group_id/source` 目前不可靠,
+    无法据此稳定恢复转发节点的真实来源会话; 而外层入站消息的 `chat_id`
+    只是当前承载这条合并转发的会话, 也不是子节点的真实原始来源。
+    因此这里统一保留 `source_chat_id=None`, 明确表达"来源未知"。
+    """
     expanded: list[ForwardEntry] = []
     for ref in candidate.forward_refs:
         if ref.embedded_nodes:
@@ -324,6 +333,7 @@ def _build_forward_entry(
     raw_nodes: list[dict[str, Any]],
     unresolved: bool = False,
 ) -> ForwardEntry:
+    """构建一条展开后的 forward 容器记录."""
     return ForwardEntry(
         forward_id=forward_id,
         summary=summary,
@@ -333,6 +343,13 @@ def _build_forward_entry(
 
 
 def _build_forward_node(node: dict[str, Any]) -> ForwardNodeEntry:
+    """构建单个转发节点记录.
+
+    当前不会尝试从子节点 payload 推断 `source_chat_id`。
+    原因是 NapCat `get_forward_msg` 返回里的 `group_id/source` 已确认可能是脏数据,
+    而外层入站消息 `chat_id` 也只是承载转发的当前会话, 不是子节点真实来源。
+    因此这里统一写入 `None`, 表示来源未知。
+    """
     raw_data = node.get("data")
     data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else node
 
@@ -348,7 +365,6 @@ def _build_forward_node(node: dict[str, Any]) -> ForwardNodeEntry:
         or sender_id
         or ""
     )
-    source_chat_id = _source_chat_id(data)
 
     content_source = data.get("content")
     if content_source is None:
@@ -360,7 +376,7 @@ def _build_forward_node(node: dict[str, Any]) -> ForwardNodeEntry:
     return ForwardNodeEntry(
         sender_id=sender_id,
         sender_name=sender_name,
-        source_chat_id=source_chat_id,
+        source_chat_id=None,
         content=content,
         media=parsed.media,
         reply_to_message_id=parsed.reply_to_message_id,
@@ -390,6 +406,7 @@ def _parse_forward_message_segments(message: Any) -> ParsedMessage:
             continue
 
         if segment.type == "forward":
+            # 转发节点里的嵌套合并转发当前仅保留占位, 不继续递归展开。
             text_parts.append("[forward]")
             continue
 
@@ -574,16 +591,6 @@ def _list_value(value: Any) -> list[Any]:
     return []
 
 
-def _source_chat_id(data: dict[str, Any]) -> str | None:
-    group_id = normalize_onebot_id(data.get("group_id"))
-    if group_id is not None:
-        return build_group_chat_id(group_id)
-
-    source = string_value(data.get("source"))
-    if source is not None:
-        return source
-
-    return None
 
 
 def _dict_get(value: Any, key: str) -> Any:

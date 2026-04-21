@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -31,6 +33,7 @@ _PING_INTERVAL_S = 30.0
 _READ_TIMEOUT_S = 60.0
 _API_TIMEOUT_S = 5.0
 _RECONNECT_INTERVAL_S = 5.0
+_INBOUND_CACHE_PATH = Path(".anon_inbound_buffer.json")
 
 
 class AnonChannel(BaseChannel):
@@ -57,6 +60,7 @@ class AnonChannel(BaseChannel):
         self._self_id: str | None = None
         self._buffer = Buffer(self.config.max_context_messages)
         self._router = InboundRouter(self.config)
+        self._inbound_cache_path = _INBOUND_CACHE_PATH
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -338,13 +342,13 @@ class AnonChannel(BaseChannel):
             logger.warning("Anon inbound processing failed: {}", exc)
             return
         candidate = processed.candidate
+        routed = self._router.route(candidate)
         cache_inbound_candidate(
             candidate,
             buffer=self._buffer,
             expanded_forwards=processed.expanded_forwards,
         )
-
-        routed = self._router.route(candidate)
+        self._write_inbound_cache_file()
         if routed is None:
             logger.debug(
                 "Anon dropped inbound candidate: event_kind={} chat_id={}",
@@ -353,13 +357,18 @@ class AnonChannel(BaseChannel):
             )
             return
 
-        await self._handle_message(
-            sender_id=routed.sender_id,
-            chat_id=routed.chat_id,
-            content=routed.content,
-            media=routed.media,
-            metadata=routed.metadata,
-            session_key=routed.session_key,
+    def _write_inbound_cache_file(self) -> None:
+        snapshot = {
+            chat_id: [
+                asdict(entry)
+                for entry in entries.values()
+                if not entry.is_from_self
+            ]
+            for chat_id, entries in self._buffer._messages.items()
+        }
+        self._inbound_cache_path.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
 
     async def _handle_disconnect(
@@ -500,6 +509,29 @@ class AnonChannel(BaseChannel):
             return status in {"ok", "failed"}
         return isinstance(status, BotStatus)
 
+    @staticmethod
+    def _get_forward_failure_text(response: OneBotRawEvent) -> str:
+        wording = getattr(response, "wording", None)
+        if isinstance(wording, str):
+            wording = wording.strip()
+            if wording:
+                return wording
+
+        message = response.message
+        if isinstance(message, str):
+            message = message.strip()
+            if message:
+                return message
+        return ""
+
+    @classmethod
+    def _is_get_forward_msg_failure(cls, response: OneBotRawEvent) -> bool:
+        return (
+            response.status == "failed"
+            or str(response.retcode or "") not in {"", "0"}
+            or response.data is None
+        )
+
     async def _resolve_forward_content(self, forward_id: str) -> Any:
         try:
             response = await self._send_api_request(
@@ -509,6 +541,18 @@ class AnonChannel(BaseChannel):
         except Exception as exc:
             logger.warning("Anon get_forward_msg failed: {}", exc)
             raise
+
+        if self._is_get_forward_msg_failure(response):
+            logger.warning(
+                (
+                    "Anon get_forward_msg returned failure: "
+                    "status={} retcode={} message={}"
+                ),
+                response.status,
+                response.retcode,
+                self._get_forward_failure_text(response),
+            )
+            return None
         return response.data
 
     def _buffer_outbound_message(

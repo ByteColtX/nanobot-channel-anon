@@ -294,8 +294,8 @@ def test_shared_id_and_chat_id_helpers() -> None:
 
 
 
-def test_process_inbound_candidate_normalizes_forward_source_chat_id() -> None:
-    """Forward nodes from groups should use the shared group chat_id format."""
+def test_process_inbound_candidate_leaves_forward_source_unknown() -> None:
+    """Forward nodes should keep source_chat_id unset when source is unreliable."""
     raw = OneBotRawEvent.model_validate(
         {
             "post_type": "message",
@@ -338,9 +338,7 @@ def test_process_inbound_candidate_normalizes_forward_source_chat_id() -> None:
         )
     )
 
-    assert (
-        processed.expanded_forwards[0].nodes[0].source_chat_id == "group:456"
-    )
+    assert processed.expanded_forwards[0].nodes[0].source_chat_id is None
 
 
 
