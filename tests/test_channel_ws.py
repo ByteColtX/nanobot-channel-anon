@@ -1702,7 +1702,7 @@ def test_status_slash_bypasses_private_probability(
     tmp_path: Path,
     raw_message: str,
 ) -> None:
-    """/status should publish even when private routing would drop it."""
+    """Authorized /status should bypass normal gating."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def case() -> None:
@@ -1712,7 +1712,8 @@ def test_status_slash_bypasses_private_probability(
         channel = AnonChannel(
             {
                 "ws_url": server.url,
-                "allow_from": ["123"],
+                "allow_from": ["999"],
+                "super_admins": ["123"],
                 "private_trigger_prob": 0.0,
             },
             bus,
@@ -1738,6 +1739,7 @@ def test_status_slash_bypasses_private_probability(
             metadata = snapshot["private:123"][0]["metadata"]
             assert metadata["trigger_reason"] == "slash_status"
             assert metadata["slash_command"] == "status"
+            assert inbound.content.strip().lower() == "/status"
             assert inbound.metadata["trigger_reason"] == "slash_status"
             assert inbound.metadata["slash_command"] == "status"
             assert inbound.metadata["cqmsg_message_ids"] == ["9301"]
@@ -1790,10 +1792,11 @@ def test_non_admin_slash_command_is_rejected_before_cache(
     asyncio.run(case())
 
 
-def test_admin_slash_command_respects_existing_private_routing(
+def test_admin_slash_command_bypasses_private_routing(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """Admin-only slash commands should still obey existing private routing."""
+    """Authorized slash commands should publish even when private routing would drop."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def case() -> None:
@@ -1803,12 +1806,13 @@ def test_admin_slash_command_respects_existing_private_routing(
         channel = AnonChannel(
             {
                 "ws_url": server.url,
-                "allow_from": ["123"],
+                "allow_from": ["999"],
                 "super_admins": [" 123 ", "123", None],
                 "private_trigger_prob": 0.0,
             },
             bus,
         )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -1821,11 +1825,19 @@ def test_admin_slash_command_respects_existing_private_routing(
                     "raw_message": "/restart",
                 }
             )
-            with pytest.raises(asyncio.TimeoutError):
-                await _consume_inbound(bus, timeout=0.2)
-            buffered = channel._buffer.get("private:123", "9303")
-            assert buffered is not None
-            assert buffered.content == "/restart"
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            metadata = snapshot["private:123"][0]["metadata"]
+            assert inbound.content == "/restart"
+            assert metadata["trigger_reason"] == "slash_command"
+            assert metadata["slash_command"] == "restart"
+            assert inbound.metadata["trigger_reason"] == "slash_command"
+            assert inbound.metadata["slash_command"] == "restart"
+            assert inbound.metadata["cqmsg_message_ids"] == ["9303"]
+            assert channel._buffer.get_unconsumed_chat_entries("private:123") == []
             assert channel.config.super_admins == ["123"]
         finally:
             await _stop_channel(channel, task, server)
@@ -1833,11 +1845,11 @@ def test_admin_slash_command_respects_existing_private_routing(
     asyncio.run(case())
 
 
-def test_super_admin_does_not_bypass_allow_from(
+def test_statusx_is_treated_as_normal_slash_command(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """super_admins should not override the existing allow_from gate."""
+    """Non-status slash commands should also bypass normal routing when authorized."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def case() -> None:
@@ -1849,52 +1861,11 @@ def test_super_admin_does_not_bypass_allow_from(
                 "ws_url": server.url,
                 "allow_from": ["999"],
                 "super_admins": ["123"],
-                "private_trigger_prob": 1.0,
-            },
-            bus,
-        )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
-        task = asyncio.create_task(channel.start())
-        try:
-            await _wait_for(lambda: channel._self_id == "42")
-            await server.send_json(
-                {
-                    "post_type": "message",
-                    "message_type": "private",
-                    "message_id": "9304",
-                    "user_id": "123",
-                    "raw_message": "/restart",
-                }
-            )
-            with pytest.raises(asyncio.TimeoutError):
-                await _consume_inbound(bus, timeout=0.2)
-            assert channel._buffer.get("private:123", "9304") is None
-            assert not channel._inbound_cache_path.exists()
-        finally:
-            await _stop_channel(channel, task, server)
-
-    asyncio.run(case())
-
-
-def test_statusx_does_not_get_status_bypass(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only the exact /status command should bypass routing."""
-    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
-
-    async def case() -> None:
-        server = OneBotWebSocketServer()
-        await server.start()
-        bus = MessageBus()
-        channel = AnonChannel(
-            {
-                "ws_url": server.url,
-                "allow_from": ["123"],
-                "super_admins": ["123"],
                 "private_trigger_prob": 0.0,
             },
             bus,
         )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -1907,11 +1878,13 @@ def test_statusx_does_not_get_status_bypass(
                     "raw_message": "/statusx",
                 }
             )
-            with pytest.raises(asyncio.TimeoutError):
-                await _consume_inbound(bus, timeout=0.2)
-            buffered = channel._buffer.get("private:123", "9305")
-            assert buffered is not None
-            assert buffered.content == "/statusx"
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            assert inbound.content == "/statusx"
+            assert inbound.metadata["trigger_reason"] == "slash_command"
+            assert inbound.metadata["slash_command"] == "statusx"
+            assert inbound.metadata["cqmsg_message_ids"] == ["9305"]
+            assert channel._buffer.get_unconsumed_chat_entries("private:123") == []
         finally:
             await _stop_channel(channel, task, server)
 

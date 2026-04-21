@@ -386,42 +386,38 @@ class AnonChannel(BaseChannel):
             )
             return
 
-        allow_list = self.config.allow_from
-        allowed = False
-        if not allow_list:
-            logger.warning("{}: allow_from is empty — all access denied", self.name)
-        elif "*" in allow_list or candidate.sender_id in allow_list:
-            allowed = True
-        elif candidate.event_kind == "group_message":
-            group_id = normalize_onebot_id(candidate.metadata.get("group_id"))
-            allowed = group_id is not None and group_id in allow_list
-
-        if not allowed:
-            logger.warning(
-                "Access denied for sender {} in chat {} on channel {}. "
-                "Add the sender ID or group ID to allow_from to grant access.",
-                candidate.sender_id,
-                candidate.chat_id,
-                self.name,
-            )
-            return
-
         slash_command = self._extract_slash_command(candidate)
         candidate.metadata["slash_command"] = slash_command
-        if (
-            slash_command is not None
-            and slash_command != "status"
-            and not self._is_super_admin(candidate.sender_id)
-        ):
-            logger.warning(
-                "Admin-only slash command denied for sender {} in chat {} "
-                "on channel {}: /{}",
-                candidate.sender_id,
-                candidate.chat_id,
-                self.name,
-                slash_command,
-            )
-            return
+        if slash_command is not None:
+            if not self._is_super_admin(candidate.sender_id):
+                logger.warning(
+                    "Slash command denied for sender {} in chat {} on channel {}: /{}",
+                    candidate.sender_id,
+                    candidate.chat_id,
+                    self.name,
+                    slash_command,
+                )
+                return
+        else:
+            allow_list = self.config.allow_from
+            allowed = False
+            if not allow_list:
+                logger.warning("{}: allow_from is empty — all access denied", self.name)
+            elif "*" in allow_list or candidate.sender_id in allow_list:
+                allowed = True
+            elif candidate.event_kind == "group_message":
+                group_id = normalize_onebot_id(candidate.metadata.get("group_id"))
+                allowed = group_id is not None and group_id in allow_list
+
+            if not allowed:
+                logger.warning(
+                    "Access denied for sender {} in chat {} on channel {}. "
+                    "Add the sender ID or group ID to allow_from to grant access.",
+                    candidate.sender_id,
+                    candidate.chat_id,
+                    self.name,
+                )
+                return
 
         try:
             processed = await process_inbound_candidate(
@@ -436,8 +432,10 @@ class AnonChannel(BaseChannel):
             return
         candidate = processed.candidate
         slash_command = candidate.metadata.get("slash_command")
-        if slash_command == "status":
-            candidate.metadata["trigger_reason"] = "slash_status"
+        if slash_command is not None:
+            candidate.metadata["trigger_reason"] = (
+                "slash_status" if slash_command == "status" else "slash_command"
+            )
             routed = candidate
         else:
             routed = self._router.route(candidate)
@@ -465,8 +463,10 @@ class AnonChannel(BaseChannel):
 
         content = routed.content
         media = list(routed.media)
+        slash_command = metadata.get("slash_command")
         if serialized is not None:
-            content = serialized.text
+            if slash_command is None:
+                content = serialized.text
             metadata["cqmsg_message_ids"] = list(serialized.message_ids)
             metadata["cqmsg_count"] = serialized.count
 
