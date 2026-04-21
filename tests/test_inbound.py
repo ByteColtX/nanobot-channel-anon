@@ -279,6 +279,7 @@ def test_process_inbound_candidate_expands_forward_and_cache_writes_message() ->
     buffered = buffer.get("private:123", "700")
     assert buffered is not None
     assert buffered.expanded_forwards[0].nodes[0].content == "forwarded"
+    assert buffered.expanded_forwards[0].nodes[0].message_id is None
 
 
 def test_shared_id_and_chat_id_helpers() -> None:
@@ -291,6 +292,54 @@ def test_shared_id_and_chat_id_helpers() -> None:
     for chat_id in ("", "group:", "foo:1", "private:abc"):
         with pytest.raises(ValueError):
             parse_chat_id(chat_id)
+
+
+
+def test_process_inbound_candidate_keeps_forward_node_message_id() -> None:
+    """Forward nodes should preserve their own message_id when available."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "message_id": "702",
+            "user_id": "123",
+            "message": [
+                {"type": "forward", "data": {"id": "fwd-4"}},
+            ],
+        }
+    )
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+    assert candidate is not None
+
+    buffer = Buffer(max_messages=10)
+
+    async def _resolve_forward(_forward_id: str) -> object:
+        return {
+            "messages": [
+                {
+                    "data": {
+                        "message_id": "inner-1",
+                        "user_id": "8",
+                        "nickname": "Bob",
+                        "content": [{"type": "text", "data": {"text": "forwarded"}}],
+                    }
+                }
+            ]
+        }
+
+    processed = asyncio.run(
+        process_inbound_candidate(
+            candidate,
+            buffer=buffer,
+            forward_resolver=_resolve_forward,
+        )
+    )
+
+    assert processed.expanded_forwards[0].nodes[0].message_id == "inner-1"
 
 
 

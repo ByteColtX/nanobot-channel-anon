@@ -1266,6 +1266,78 @@ def test_allowlisted_inbound_is_cached_without_publish(
     asyncio.run(case())
 
 
+def test_build_incremental_cqmsg_and_ack(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Channel CQMSG build should stay stable until ack, then advance."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            channel._buffer.add(
+                MessageEntry(
+                    message_id="1",
+                    chat_id="private:123",
+                    sender_id="123",
+                    sender_name="peer",
+                    is_from_self=False,
+                    content="hello",
+                )
+            )
+            channel._buffer.add(
+                MessageEntry(
+                    message_id="2",
+                    chat_id="private:123",
+                    sender_id="42",
+                    sender_name="bot",
+                    is_from_self=True,
+                    content="world",
+                )
+            )
+
+            first = channel.build_incremental_cqmsg("private:123")
+            second = channel.build_incremental_cqmsg("private:123")
+
+            assert first is not None
+            assert second is not None
+            assert first.text == second.text
+            assert (
+                channel.ack_incremental_cqmsg("private:123", first.message_ids)
+                is True
+            )
+            assert channel.build_incremental_cqmsg("private:123") is None
+
+            channel._buffer.add(
+                MessageEntry(
+                    message_id="3",
+                    chat_id="private:123",
+                    sender_id="123",
+                    sender_name="peer",
+                    is_from_self=False,
+                    content="again",
+                )
+            )
+            third = channel.build_incremental_cqmsg("private:123")
+            assert third is not None
+            assert third.message_ids == ["3"]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+
 def test_send_delta_sends_plain_text_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """send_delta() should fall back to a normal text send."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)

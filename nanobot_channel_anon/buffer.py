@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,6 +16,7 @@ class ForwardNodeEntry:
     sender_name: str
     source_chat_id: str | None
     content: str
+    message_id: str | None = None
     media: list[str] = field(default_factory=list)
     reply_to_message_id: str | None = None
     segment_types: list[str] = field(default_factory=list)
@@ -56,15 +58,23 @@ class Buffer:
         """Initialize the buffer with a per-chat capacity."""
         self._max_messages = max_messages
         self._messages: dict[str, OrderedDict[str, MessageEntry]] = {}
+        self._consumed_counts: dict[str, int] = {}
 
     def add(self, entry: MessageEntry) -> None:
         """Add or replace a message entry for its chat."""
         chat_entries = self._messages.setdefault(entry.chat_id, OrderedDict())
+        consumed_count = self._consumed_counts.get(entry.chat_id, 0)
         if entry.message_id in chat_entries:
+            existing_index = list(chat_entries).index(entry.message_id)
+            if existing_index < consumed_count:
+                consumed_count -= 1
             del chat_entries[entry.message_id]
         chat_entries[entry.message_id] = entry
         while len(chat_entries) > self._max_messages:
             chat_entries.popitem(last=False)
+            if consumed_count > 0:
+                consumed_count -= 1
+        self._consumed_counts[entry.chat_id] = consumed_count
 
     def get(self, chat_id: str, message_id: str | None) -> MessageEntry | None:
         """Return a buffered message by chat and message ID."""
@@ -86,3 +96,28 @@ class Buffer:
         if chat_entries is None:
             return []
         return list(chat_entries.values())
+
+    def get_unconsumed_chat_entries(self, chat_id: str) -> list[MessageEntry]:
+        """Return unread buffered messages for a chat in insertion order."""
+        entries = self.get_chat_entries(chat_id)
+        consumed_count = min(self._consumed_counts.get(chat_id, 0), len(entries))
+        return entries[consumed_count:]
+
+    def mark_chat_entries_consumed(
+        self,
+        chat_id: str,
+        message_ids: Sequence[str],
+    ) -> bool:
+        """Advance the consumed cursor when IDs match the unread prefix."""
+        if not message_ids:
+            return True
+        unread_entries = self.get_unconsumed_chat_entries(chat_id)
+        unread_ids = [entry.message_id for entry in unread_entries[: len(message_ids)]]
+        target_ids = list(message_ids)
+        if unread_ids != target_ids:
+            return False
+        self._consumed_counts[chat_id] = min(
+            self._consumed_counts.get(chat_id, 0) + len(target_ids),
+            len(self.get_chat_entries(chat_id)),
+        )
+        return True

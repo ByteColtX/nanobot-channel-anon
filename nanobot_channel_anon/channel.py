@@ -26,6 +26,7 @@ from nanobot_channel_anon.inbound import (
 from nanobot_channel_anon.onebot import BotStatus, OneBotAPIRequest, OneBotRawEvent
 from nanobot_channel_anon.outbound import build_send_request
 from nanobot_channel_anon.router import InboundRouter
+from nanobot_channel_anon.serializer import SerializedCQMessage, serialize_buffer_chat
 from nanobot_channel_anon.utils import normalize_onebot_id
 
 _CONNECT_TIMEOUT_S = 10.0
@@ -147,14 +148,23 @@ class AnonChannel(BaseChannel):
         """Send a delta as a normal outbound text message."""
         if not delta:
             return
+        outbound_metadata: dict[str, Any] = {} if metadata is None else metadata
         await self.send(
             OutboundMessage(
                 channel=self.name,
                 chat_id=chat_id,
                 content=delta,
-                metadata=metadata or {},
+                metadata=outbound_metadata,
             )
         )
+
+    def build_incremental_cqmsg(self, chat_id: str) -> SerializedCQMessage | None:
+        """Build a CQMSG block from unread buffered messages."""
+        return serialize_buffer_chat(self._buffer, chat_id, self_id=self._self_id)
+
+    def ack_incremental_cqmsg(self, chat_id: str, message_ids: list[str]) -> bool:
+        """Advance the unread cursor for a serialized CQMSG batch."""
+        return self._buffer.mark_chat_entries_consumed(chat_id, message_ids)
 
     async def _connect_ws(self) -> aiohttp.ClientWebSocketResponse:
         session = self._require_session()
