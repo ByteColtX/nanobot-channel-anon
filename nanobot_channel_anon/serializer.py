@@ -186,11 +186,12 @@ from nanobot_channel_anon.utils import parse_chat_id, string_value
 
 @dataclass(slots=True)
 class SerializedCQMessage:
-    """A serialized CQMSG block plus the message IDs it consumed."""
+    """A serialized CQMSG block plus the message IDs and media it consumed."""
 
     chat_id: str
     text: str
     message_ids: list[str]
+    media: list[str]
     count: int
 
 
@@ -230,6 +231,7 @@ class _CQMSGBuilder:
         self._images: list[_ImageRow] = []
         self._image_ids: dict[str, str] = {}
         self._message_ids = [entry.message_id for entry in entries]
+        self._media = self._collect_media(entries)
         self._private_peer_id = str(self.target_id) if self.is_private else None
         self._private_index = 0
         self._group_index = 0
@@ -262,6 +264,7 @@ class _CQMSGBuilder:
             chat_id=self.chat_id,
             text="\n".join(lines),
             message_ids=list(self._message_ids),
+            media=list(self._media),
             count=len(self.entries),
         )
 
@@ -319,6 +322,23 @@ class _CQMSGBuilder:
         if entry.reply_to_message_id:
             body = f">m:{entry.reply_to_message_id} {body}".strip()
         return body, forward_lines
+
+    @staticmethod
+    def _collect_media(entries: list[MessageEntry]) -> list[str]:
+        """聚合同一 unread 窗口内应附带给模型的图片列表。
+
+        当前只包含 live 消息的顶层图片；forward 节点图片仍只保留在
+        CQMSG 文本引用中，不会进入多模态输入。这是有意为之，不是遗漏实现。
+        """
+        media: list[str] = []
+        seen: set[str] = set()
+        for entry in entries:
+            for media_ref in entry.media:
+                if media_ref in seen:
+                    continue
+                seen.add(media_ref)
+                media.append(media_ref)
+        return media
 
     def _render_forward(self, fid: str, forward: ForwardEntry) -> list[str]:
         lines = [self._render_forward_container(fid, forward)]

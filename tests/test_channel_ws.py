@@ -2472,6 +2472,196 @@ def test_allowed_private_image_inbound_downloads_to_media_cache(
 
 
 
+def test_group_inbound_attaches_history_only_image_from_unread_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A routed group message should publish unread history images too."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "group_trigger_prob": 0.0,
+                "media_max_size_mb": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9401",
+                    "group_id": "456",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "history.png",
+                                "url": "https://example.com/history.png",
+                                "file_size": "4",
+                            },
+                        }
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9402",
+                    "group_id": "456",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "at", "data": {"qq": "42"}},
+                        {"type": "text", "data": {"text": "看图"}},
+                    ],
+                }
+            )
+            inbound = await _consume_inbound(bus)
+            history_path = (tmp_path / "media" / "history.png").resolve()
+            assert inbound.media == [str(history_path)]
+            assert "I|i0|history.png" in inbound.content
+            assert "M|9401|u1|[i0]" in inbound.content
+            assert "M|9402|u1|看图" in inbound.content
+            assert inbound.metadata["cqmsg_message_ids"] == ["9401", "9402"]
+            assert channel._buffer.get_unconsumed_chat_entries("group:456") == []
+        finally:
+            await _stop_channel(channel, task, server)
+
+    def fake_get(
+        self: aiohttp.ClientSession,
+        url: str,
+        **kwargs: Any,
+    ) -> FakeDownloadResponse:
+        del self, kwargs
+        assert url == "https://example.com/history.png"
+        return FakeDownloadResponse(b"history")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    asyncio.run(case())
+
+
+
+def test_group_inbound_attaches_history_and_trigger_images_from_unread_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A routed group message should publish both history and trigger images."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "group_trigger_prob": 0.0,
+                "media_max_size_mb": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9403",
+                    "group_id": "456",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "history.png",
+                                "url": "https://example.com/history.png",
+                                "file_size": "4",
+                            },
+                        }
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9404",
+                    "group_id": "456",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "at", "data": {"qq": "42"}},
+                        {"type": "text", "data": {"text": "看这两张"}},
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "trigger.png",
+                                "url": "https://example.com/trigger.png",
+                                "file_size": "4",
+                            },
+                        },
+                    ],
+                }
+            )
+            inbound = await _consume_inbound(bus)
+            history_path = (tmp_path / "media" / "history.png").resolve()
+            trigger_path = (tmp_path / "media" / "trigger.png").resolve()
+            assert inbound.media == [str(history_path), str(trigger_path)]
+            assert "I|i0|history.png" in inbound.content
+            assert "I|i1|trigger.png" in inbound.content
+            assert "M|9403|u1|[i0]" in inbound.content
+            assert "M|9404|u1|看这两张[i1]" in inbound.content
+            assert inbound.metadata["cqmsg_message_ids"] == ["9403", "9404"]
+            assert channel._buffer.get_unconsumed_chat_entries("group:456") == []
+        finally:
+            await _stop_channel(channel, task, server)
+
+    def fake_get(
+        self: aiohttp.ClientSession,
+        url: str,
+        **kwargs: Any,
+    ) -> FakeDownloadResponse:
+        del self, kwargs
+        body = b"history" if url.endswith("history.png") else b"trigger"
+        return FakeDownloadResponse(body)
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    asyncio.run(case())
+
+
+
 def test_disallowed_private_image_inbound_skips_download(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

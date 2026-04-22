@@ -1,5 +1,10 @@
 """Tests for CQMSG serialization."""
 
+import base64
+from pathlib import Path
+
+from nanobot.agent.context import ContextBuilder
+
 from nanobot_channel_anon.buffer import (
     Buffer,
     ForwardEntry,
@@ -9,6 +14,10 @@ from nanobot_channel_anon.buffer import (
 from nanobot_channel_anon.serializer import (
     serialize_buffer_chat,
     serialize_chat_entries,
+)
+
+_MINIMAL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZxioAAAAASUVORK5CYII="
 )
 
 
@@ -358,3 +367,147 @@ def test_serialize_image_and_transcription_without_audio_rows() -> None:
         "M|9002002|peer|看下这个 [i0] [transcription: 收到语音]"
         in serialized.text
     )
+
+
+
+def test_context_builder_attaches_all_unread_window_images(
+    tmp_path: Path,
+) -> None:
+    """Unread-window history and trigger images should all become multimodal blocks."""
+    history_image = tmp_path / "history.png"
+    history_image.write_bytes(_MINIMAL_PNG)
+    trigger_image = tmp_path / "trigger.png"
+    trigger_image.write_bytes(_MINIMAL_PNG)
+
+    serialized = serialize_chat_entries(
+        "private:123",
+        [
+            MessageEntry(
+                message_id="9003001",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="历史图 [image]",
+                media=[str(history_image)],
+            ),
+            MessageEntry(
+                message_id="9003002",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="当前图 [image]",
+                media=[str(trigger_image)],
+            ),
+        ],
+        self_id="42",
+    )
+    assert serialized is not None
+    assert serialized.media == [str(history_image), str(trigger_image)]
+
+    builder = ContextBuilder(tmp_path)
+    messages = builder.build_messages(
+        history=[],
+        current_message=serialized.text,
+        media=serialized.media,
+        channel="anon",
+        chat_id="private:123",
+    )
+
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, list)
+    image_blocks = [
+        item
+        for item in user_content
+        if isinstance(item, dict) and item.get("type") == "image_url"
+    ]
+    text_blocks = [
+        item
+        for item in user_content
+        if isinstance(item, dict) and item.get("type") == "text"
+    ]
+
+    assert [item["_meta"]["path"] for item in image_blocks] == [
+        str(history_image),
+        str(trigger_image),
+    ]
+    assert "I|i0|history.png" in text_blocks[-1]["text"]
+    assert "I|i1|trigger.png" in text_blocks[-1]["text"]
+
+
+
+def test_context_builder_attaches_history_only_images_from_unread_window(
+    tmp_path: Path,
+) -> None:
+    """History-only unread-window images should still become multimodal blocks."""
+    history_image = tmp_path / "history.png"
+    history_image.write_bytes(_MINIMAL_PNG)
+
+    serialized = serialize_chat_entries(
+        "private:123",
+        [
+            MessageEntry(
+                message_id="9003003",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="只有历史图 [image]",
+                media=[str(history_image)],
+            )
+        ],
+        self_id="42",
+    )
+    assert serialized is not None
+    assert serialized.media == [str(history_image)]
+
+    builder = ContextBuilder(tmp_path)
+    messages = builder.build_messages(
+        history=[],
+        current_message=serialized.text,
+        media=serialized.media,
+        channel="anon",
+        chat_id="private:123",
+    )
+
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, list)
+    image_blocks = [
+        item
+        for item in user_content
+        if isinstance(item, dict) and item.get("type") == "image_url"
+    ]
+    assert [item["_meta"]["path"] for item in image_blocks] == [str(history_image)]
+
+
+
+def test_serialize_chat_entries_aggregates_media_in_order_and_dedupes() -> None:
+    """Serialized media should follow unread order and dedupe identical refs."""
+    serialized = serialize_chat_entries(
+        "private:123",
+        [
+            MessageEntry(
+                message_id="9003004",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="[image]",
+                media=["/tmp/a.png", "/tmp/b.png"],
+            ),
+            MessageEntry(
+                message_id="9003005",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="[image][image]",
+                media=["/tmp/b.png", "/tmp/c.png"],
+            ),
+        ],
+        self_id="42",
+    )
+
+    assert serialized is not None
+    assert serialized.media == ["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"]

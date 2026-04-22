@@ -682,6 +682,7 @@ class AnonChannel(BaseChannel):
         if serialized is not None:
             if slash_command is None:
                 content = serialized.text
+                media = list(serialized.media)
             metadata["cqmsg_message_ids"] = list(serialized.message_ids)
             metadata["cqmsg_count"] = serialized.count
 
