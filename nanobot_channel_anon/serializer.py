@@ -325,10 +325,11 @@ class _CQMSGBuilder:
 
     @staticmethod
     def _collect_media(entries: list[MessageEntry]) -> list[str]:
-        """聚合同一 unread 窗口内应附带给模型的图片列表。
+        """聚合同一 unread 窗口内应附带给模型的图片列表.
 
         当前只包含 live 消息的顶层图片；forward 节点图片仍只保留在
         CQMSG 文本引用中，不会进入多模态输入。这是有意为之，不是遗漏实现。
+
         """
         media: list[str] = []
         seen: set[str] = set()

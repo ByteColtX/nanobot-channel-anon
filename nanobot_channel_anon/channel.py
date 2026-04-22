@@ -45,6 +45,7 @@ _READ_TIMEOUT_S = 60.0
 _API_TIMEOUT_S = 5.0
 _RECONNECT_INTERVAL_S = 5.0
 _SESSION_QUEUE_MAX_SIZE = 64
+_GROUP_MUTE_WARMUP_CONCURRENCY = 8
 _MEDIA_DOWNLOAD_TIMEOUT_S = 30.0
 _FFMPEG_TIMEOUT_S = 30.0
 _INBOUND_CACHE_PATH = Path(".anon_inbound_buffer.json")
@@ -94,8 +95,12 @@ class AnonChannel(BaseChannel):
         self._self_id: str | None = None
         self._self_nickname: str = ""
         self._muted_groups: dict[str, int] = {}
-        self._group_mute_state_ready = asyncio.Event()
-        self._group_mute_state_ready.set()
+        self._known_group_mute_states: set[str] = set()
+        self._group_mute_seed_ready = asyncio.Event()
+        self._group_mute_seed_ready.set()
+        self._group_mute_state_waiters: dict[str, asyncio.Future[None]] = {}
+        self._group_mute_state_tasks: dict[str, asyncio.Task[None]] = {}
+        self._group_mute_warmup_task: asyncio.Task[None] | None = None
         self._buffer = Buffer(self.config.max_context_messages)
         self._router = InboundRouter(self.config)
         self._inbound_cache_path = _INBOUND_CACHE_PATH
@@ -137,13 +142,12 @@ class AnonChannel(BaseChannel):
                 reader_task = asyncio.create_task(self._listen_loop(ws))
                 self._reader_task = reader_task
                 self._ping_task = asyncio.create_task(self._ping_loop(ws))
-                self._group_mute_state_ready.clear()
-                self._muted_groups.clear()
+                self._reset_group_mute_sync_state()
                 try:
                     await self._fetch_self_id()
                     await self._refresh_group_mute_states()
                 finally:
-                    self._group_mute_state_ready.set()
+                    self._group_mute_seed_ready.set()
 
                 disconnect_reason = "WebSocket reader exited"
                 try:
@@ -399,6 +403,25 @@ class AnonChannel(BaseChannel):
                 return None
         return None
 
+    def _reset_group_mute_sync_state(self) -> None:
+        self._muted_groups.clear()
+        self._known_group_mute_states.clear()
+        self._group_mute_seed_ready.clear()
+
+        warmup_task = self._group_mute_warmup_task
+        self._group_mute_warmup_task = None
+        if warmup_task is not None:
+            warmup_task.cancel()
+
+        for task in self._group_mute_state_tasks.values():
+            task.cancel()
+        self._group_mute_state_tasks.clear()
+
+        for future in self._group_mute_state_waiters.values():
+            if not future.done():
+                future.cancel()
+        self._group_mute_state_waiters.clear()
+
     async def _refresh_group_mute_states(self) -> None:
         if self._self_id is None:
             return
@@ -411,8 +434,10 @@ class AnonChannel(BaseChannel):
         except Exception as exc:
             if self._should_stop():
                 logger.debug("Anon skipped group mute sync during shutdown")
+                self._group_mute_seed_ready.set()
                 return
             logger.warning("Anon get_group_list failed during mute sync: {}", exc)
+            self._group_mute_seed_ready.set()
             return
 
         if response.status == "failed" or str(response.retcode or "") not in {"", "0"}:
@@ -424,35 +449,116 @@ class AnonChannel(BaseChannel):
                 response.status,
                 response.retcode,
             )
+            self._group_mute_seed_ready.set()
             return
 
         groups = response.data
         if not isinstance(groups, list):
             logger.warning("Anon get_group_list returned invalid data during mute sync")
+            self._group_mute_seed_ready.set()
             return
 
-        muted_groups: dict[str, int] = {}
+        group_ids: list[str] = []
         for item in groups:
             if not isinstance(item, dict):
                 continue
             group_id = normalize_onebot_id(item.get("group_id"))
             if group_id is None:
                 continue
-            muted_until = await self._fetch_group_muted_until(group_id)
-            if muted_until is not None:
-                muted_groups[group_id] = muted_until
-                logger.info(
-                    "Anon mute sync marked group as muted: group_id={} muted_until={}",
-                    group_id,
-                    muted_until,
-                )
+            group_ids.append(group_id)
+            self._group_mute_state_waiters.setdefault(
+                group_id,
+                asyncio.get_running_loop().create_future(),
+            )
 
-        self._muted_groups = muted_groups
-        logger.info(
-            "Anon mute sync completed: scanned_groups={} muted_groups={}",
-            len(groups),
-            len(muted_groups),
-        )
+        logger.info("Anon mute sync discovered groups: {}", len(group_ids))
+
+        self._group_mute_seed_ready.set()
+
+        if group_ids:
+            self._group_mute_warmup_task = asyncio.create_task(
+                self._warmup_group_mute_states(group_ids)
+            )
+        else:
+            logger.info("Anon mute sync completed: scanned_groups=0 muted_groups=0")
+
+    async def _warmup_group_mute_states(self, group_ids: list[str]) -> None:
+        semaphore = asyncio.Semaphore(_GROUP_MUTE_WARMUP_CONCURRENCY)
+
+        async def warm_group(group_id: str) -> None:
+            async with semaphore:
+                await self._ensure_group_mute_state_known(group_id)
+
+        try:
+            await asyncio.gather(*(warm_group(group_id) for group_id in group_ids))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Anon group mute warm-up failed: {}", exc)
+        finally:
+            logger.info(
+                "Anon mute sync completed: scanned_groups={} muted_groups={}",
+                len(group_ids),
+                len(self._muted_groups),
+            )
+            if self._group_mute_warmup_task is asyncio.current_task():
+                self._group_mute_warmup_task = None
+
+    async def _ensure_group_mute_state_known(self, group_id: str) -> None:
+        if group_id in self._known_group_mute_states:
+            return
+
+        waiter = self._group_mute_state_waiters.get(group_id)
+        if waiter is None or waiter.cancelled():
+            waiter = asyncio.get_running_loop().create_future()
+            self._group_mute_state_waiters[group_id] = waiter
+
+        task = self._group_mute_state_tasks.get(group_id)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self._sync_single_group_mute_state(group_id, waiter)
+            )
+            self._group_mute_state_tasks[group_id] = task
+
+        await asyncio.shield(waiter)
+
+    async def _sync_single_group_mute_state(
+        self,
+        group_id: str,
+        waiter: asyncio.Future[None],
+    ) -> None:
+        try:
+            muted_until = await self._fetch_group_muted_until(group_id)
+            current_waiter = self._group_mute_state_waiters.get(group_id)
+            if current_waiter is waiter and not waiter.done():
+                if muted_until is None:
+                    self._muted_groups.pop(group_id, None)
+                else:
+                    self._muted_groups[group_id] = muted_until
+                    logger.info(
+                        (
+                            "Anon mute sync marked group as muted: "
+                            "group_id={} muted_until={}"
+                        ),
+                        group_id,
+                        muted_until,
+                    )
+                self._mark_group_mute_state_known(group_id)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            task = self._group_mute_state_tasks.get(group_id)
+            if task is asyncio.current_task():
+                self._group_mute_state_tasks.pop(group_id, None)
+
+    def _mark_group_mute_state_known(self, group_id: str) -> None:
+        self._known_group_mute_states.add(group_id)
+        waiter = self._group_mute_state_waiters.get(group_id)
+        if waiter is None:
+            waiter = asyncio.get_running_loop().create_future()
+            self._group_mute_state_waiters[group_id] = waiter
+        if not waiter.done():
+            waiter.set_result(None)
 
     async def _fetch_group_muted_until(self, group_id: str) -> int | None:
         try:
@@ -519,6 +625,7 @@ class AnonChannel(BaseChannel):
 
         if payload.sub_type == "lift_ban":
             self._muted_groups.pop(group_id, None)
+            self._mark_group_mute_state_known(group_id)
             logger.info("Anon bot mute lifted: group_id={}", group_id)
             return True
 
@@ -541,6 +648,7 @@ class AnonChannel(BaseChannel):
 
         muted_until = event_time + duration
         self._muted_groups[group_id] = muted_until
+        self._mark_group_mute_state_known(group_id)
         logger.info(
             "Anon bot muted in group: group_id={} duration={} muted_until={}",
             group_id,
@@ -549,10 +657,9 @@ class AnonChannel(BaseChannel):
         )
         return True
 
-    async def _wait_for_group_mute_state(self) -> None:
-        if self._group_mute_state_ready.is_set():
-            return
-        await self._group_mute_state_ready.wait()
+    async def _wait_for_group_mute_state(self, group_id: str) -> None:
+        await self._group_mute_seed_ready.wait()
+        await self._ensure_group_mute_state_known(group_id)
 
     def _is_group_muted(self, group_id: str) -> bool:
         muted_until = self._muted_groups.get(group_id)
@@ -591,15 +698,16 @@ class AnonChannel(BaseChannel):
             return
 
         if candidate.event_kind == "group_message":
-            await self._wait_for_group_mute_state()
             group_id = normalize_onebot_id(candidate.metadata.get("group_id"))
-            if group_id is not None and self._is_group_muted(group_id):
-                logger.info(
-                    "Anon ignored muted group inbound: group_id={} sender_id={}",
-                    group_id,
-                    candidate.sender_id,
-                )
-                return
+            if group_id is not None:
+                await self._wait_for_group_mute_state(group_id)
+                if self._is_group_muted(group_id):
+                    logger.info(
+                        "Anon ignored muted group inbound: group_id={} sender_id={}",
+                        group_id,
+                        candidate.sender_id,
+                    )
+                    return
 
         slash_command = self._extract_slash_command(candidate)
         candidate.metadata["slash_command"] = slash_command
@@ -741,6 +849,8 @@ class AnonChannel(BaseChannel):
             with contextlib.suppress(Exception):
                 await ws.close()
 
+        self._reset_group_mute_sync_state()
+
         if not self._should_stop():
             logger.info("Anon WebSocket disconnected: {}", reason)
 
@@ -819,6 +929,8 @@ class AnonChannel(BaseChannel):
         if ws is not None and not ws.closed:
             with contextlib.suppress(Exception):
                 await ws.close()
+
+        self._reset_group_mute_sync_state()
 
         current_task = asyncio.current_task()
         for attr in ("_ping_task", "_reader_task"):
