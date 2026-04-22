@@ -125,6 +125,7 @@ def test_normalize_notice_poke() -> None:
             "post_type": "notice",
             "notice_type": "notify",
             "sub_type": "poke",
+            "time": 1776818315,
             "user_id": "123",
             "group_id": "456",
             "target_id": "42",
@@ -140,7 +141,9 @@ def test_normalize_notice_poke() -> None:
     assert candidate is not None
     assert candidate.event_kind == "poke"
     assert candidate.chat_id == "group:456"
+    assert candidate.content == "[notice:poke] 戳了戳你"
     assert candidate.metadata["target_id"] == "42"
+    assert candidate.metadata["message_id"] == "notice:poke:1776818315:456:123:42"
 
 
 def test_normalize_forward_segment_collects_forward_refs() -> None:

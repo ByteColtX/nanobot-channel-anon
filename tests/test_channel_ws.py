@@ -1899,10 +1899,10 @@ def test_statusx_is_treated_as_normal_slash_command(
     asyncio.run(case())
 
 
-def test_routed_poke_falls_back_to_raw_inbound_content(
+def test_routed_poke_serializes_into_cqmsg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Routed poke events should publish raw content when CQMSG is unavailable."""
+    """Routed private poke events should publish through CQMSG."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def case() -> None:
@@ -1925,6 +1925,7 @@ def test_routed_poke_falls_back_to_raw_inbound_content(
                     "post_type": "notice",
                     "notice_type": "notify",
                     "sub_type": "poke",
+                    "time": 1776818315,
                     "user_id": "123",
                     "target_id": "42",
                 }
@@ -1932,9 +1933,72 @@ def test_routed_poke_falls_back_to_raw_inbound_content(
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "private:123"
             assert inbound.sender_id == "123"
-            assert inbound.content == "戳了戳你"
+            assert "<CQMSG/1 bot:me n:1>" in inbound.content
+            assert (
+                "M|notice:poke:1776818315:private:123:42|peer|[notice:poke] 戳了戳你"
+                in inbound.content
+            )
             assert inbound.metadata["trigger_reason"] == "poke"
-            assert "cqmsg_message_ids" not in inbound.metadata
+            assert inbound.metadata["cqmsg_message_ids"] == [
+                "notice:poke:1776818315:private:123:42"
+            ]
+            assert inbound.metadata["cqmsg_count"] == 1
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+
+def test_group_poke_accepts_matching_group_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Group poke should pass when allow_from contains the group ID."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["456"],
+                "trigger_on_poke": True,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "notice",
+                    "notice_type": "notify",
+                    "sub_type": "poke",
+                    "time": 1776818315,
+                    "group_id": "456",
+                    "user_id": "123",
+                    "target_id": "42",
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            assert inbound.chat_id == "group:456"
+            assert inbound.sender_id == "123"
+            assert inbound.metadata["group_id"] == "456"
+            assert inbound.metadata["trigger_reason"] == "poke"
+            assert inbound.metadata["cqmsg_message_ids"] == [
+                "notice:poke:1776818315:456:123:42"
+            ]
+            assert inbound.metadata["cqmsg_count"] == 1
+            assert "<CQMSG/1 g:456 bot:u0 n:1>" in inbound.content
+            assert (
+                "M|notice:poke:1776818315:456:123:42|u1|[notice:poke] 戳了戳你"
+                in inbound.content
+            )
         finally:
             await _stop_channel(channel, task, server)
 

@@ -408,7 +408,7 @@ class AnonChannel(BaseChannel):
                 logger.warning("{}: allow_from is empty — all access denied", self.name)
             elif "*" in allow_list or candidate.sender_id in allow_list:
                 allowed = True
-            elif candidate.event_kind == "group_message":
+            else:
                 group_id = normalize_onebot_id(candidate.metadata.get("group_id"))
                 allowed = group_id is not None and group_id in allow_list
 

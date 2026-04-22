@@ -535,12 +535,18 @@ def _normalize_notice_event(
     )
 
     target_id = normalize_onebot_id(getattr(raw, "target_id", None))
+    message_id = _notice_message_id(
+        raw,
+        sender_id=sender_id,
+        group_id=group_id,
+        target_id=target_id,
+    )
     metadata = {
         "event_kind": "poke",
         "onebot_post_type": raw.post_type,
         "onebot_notice_type": raw.notice_type,
         "onebot_sub_type": raw.sub_type,
-        "message_id": normalize_onebot_id(raw.message_id),
+        "message_id": message_id,
         "user_id": sender_id,
         "group_id": group_id,
         "target_id": target_id,
@@ -551,10 +557,36 @@ def _normalize_notice_event(
     return InboundCandidate(
         sender_id=sender_id,
         chat_id=chat_id,
-        content="戳了戳你",
+        content="[notice:poke] 戳了戳你",
         media=[],
         metadata=metadata,
         event_kind="poke",
+    )
+
+
+def _notice_message_id(
+    raw: OneBotRawEvent,
+    *,
+    sender_id: str,
+    group_id: str | None,
+    target_id: str | None,
+) -> str:
+    message_id = normalize_onebot_id(raw.message_id)
+    if message_id is not None:
+        return message_id
+
+    event_time = string_value(raw.time) or "0"
+    chat_scope = group_id or "private"
+    target_part = target_id or "unknown"
+    return ":".join(
+        (
+            "notice",
+            raw.sub_type or raw.notice_type or "event",
+            event_time,
+            chat_scope,
+            sender_id,
+            target_part,
+        )
     )
 
 
