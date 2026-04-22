@@ -27,6 +27,8 @@ _MAX_ITERATIONS_PATTERN = re.compile(
     r"^I reached the maximum number of tool call iterations \(\d+\) without "
     r"completing the task\. You can try breaking the task into smaller steps\.$"
 )
+_INLINE_CQ_PATTERN = re.compile(r"\[CQ:([^,\]]+)(?:,([^\]]+))?\]")
+_VALID_NUMERIC_ID_PATTERN = re.compile(r"^\d+$")
 
 
 def build_send_request(
@@ -69,10 +71,9 @@ def build_message_segments(
     metadata: dict[str, Any] | None = None,
 ) -> list[OneBotMessageSegment]:
     """Build OneBot segments for text and resolved media outbound."""
-    segments = [
-        *_build_reply_placeholder_segments(metadata),
-        *_build_mention_placeholder_segments(metadata),
-    ]
+    del metadata
+    reply_segment, body_segments = _parse_inline_cq_content(content)
+    segments = [] if reply_segment is None else [reply_segment]
 
     for media_ref in media:
         segments.append(
@@ -82,9 +83,7 @@ def build_message_segments(
             )
         )
 
-    if content:
-        segments.append(OneBotMessageSegment(type="text", data={"text": content}))
-
+    segments.extend(body_segments)
     return segments
 
 
@@ -113,18 +112,81 @@ def split_outbound_batches(
     return batches
 
 
-def _build_reply_placeholder_segments(
-    metadata: dict[str, Any] | None,
-) -> list[OneBotMessageSegment]:
-    del metadata
-    return []
+def _parse_inline_cq_content(
+    content: str,
+) -> tuple[OneBotMessageSegment | None, list[OneBotMessageSegment]]:
+    """Parse supported inline CQ into a reply header plus body segments."""
+    if not content:
+        return None, []
+
+    reply_segment: OneBotMessageSegment | None = None
+    body_segments: list[OneBotMessageSegment] = []
+    cursor = 0
+    pending_text = ""
+
+    for match in _INLINE_CQ_PATTERN.finditer(content):
+        start, end = match.span()
+        pending_text += content[cursor:start]
+        cq_segment = _build_supported_inline_cq_segment(
+            match.group(1),
+            match.group(2) or "",
+        )
+        if cq_segment is None:
+            pending_text += match.group(0)
+        else:
+            if pending_text:
+                body_segments.append(
+                    OneBotMessageSegment(type="text", data={"text": pending_text})
+                )
+                pending_text = ""
+            if cq_segment.type == "reply" and reply_segment is None:
+                reply_segment = cq_segment
+            elif cq_segment.type != "reply":
+                body_segments.append(cq_segment)
+        cursor = end
+
+    pending_text += content[cursor:]
+    if pending_text:
+        body_segments.append(
+            OneBotMessageSegment(type="text", data={"text": pending_text})
+        )
+    return reply_segment, body_segments
 
 
-def _build_mention_placeholder_segments(
-    metadata: dict[str, Any] | None,
-) -> list[OneBotMessageSegment]:
-    del metadata
-    return []
+def _build_supported_inline_cq_segment(
+    cq_type: str,
+    params_raw: str,
+) -> OneBotMessageSegment | None:
+    """Return a supported OneBot segment for inline CQ, or none."""
+    normalized_type = cq_type.strip().lower()
+    params = _parse_cq_params(params_raw)
+    if normalized_type == "at":
+        qq = params.get("qq", "").strip()
+        if qq == "all" or _VALID_NUMERIC_ID_PATTERN.fullmatch(qq):
+            return OneBotMessageSegment(type="at", data={"qq": qq})
+        return None
+    if normalized_type == "reply":
+        message_id = params.get("id", "").strip()
+        if _VALID_NUMERIC_ID_PATTERN.fullmatch(message_id):
+            return OneBotMessageSegment(type="reply", data={"id": message_id})
+        return None
+    return None
+
+
+def _parse_cq_params(params_raw: str) -> dict[str, str]:
+    """Parse CQ params from a comma-separated key=value string."""
+    params: dict[str, str] = {}
+    if not params_raw:
+        return params
+    for part in params_raw.split(","):
+        key, separator, value = part.partition("=")
+        if not separator:
+            return {}
+        normalized_key = key.strip()
+        if not normalized_key:
+            return {}
+        params[normalized_key] = value
+    return params
 
 
 def guess_media_segment_type(media_ref: str) -> str:

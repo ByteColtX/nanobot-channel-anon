@@ -1105,6 +1105,96 @@ def test_send_ignores_explicit_reply_fields(monkeypatch: pytest.MonkeyPatch) -> 
     asyncio.run(case())
 
 
+def test_send_parses_inline_cq_at_and_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline CQ at/reply should become OneBot segments in order."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(
+                    channel="anon",
+                    chat_id="group:2",
+                    content="前[CQ:reply,id=456][CQ:at,qq=123]后",
+                )
+            )
+            action = _find_action(server, "send_group_msg")
+            assert action["params"]["message"] == [
+                {"type": "reply", "data": {"id": "456"}},
+                {"type": "text", "data": {"text": "前"}},
+                {"type": "at", "data": {"qq": "123"}},
+                {"type": "text", "data": {"text": "后"}},
+            ]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_keeps_unsupported_or_invalid_cq_as_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported malformed or invalid-target CQ should remain literal text."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        await _reply_to_send_action(payload, ws)
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(
+                    channel="anon",
+                    chat_id="private:1",
+                    content=(
+                        "a[CQ:image,file=file:///tmp/demo.png]"
+                        "b[CQ:at]c[CQ:reply]"
+                        "d[CQ:at,qq=对方QQ号]e[CQ:reply,id=原消息ID]"
+                    ),
+                )
+            )
+            action = _find_action(server, "send_private_msg")
+            assert action["params"]["message"] == [
+                {
+                    "type": "text",
+                    "data": {
+                        "text": (
+                            "a[CQ:image,file=file:///tmp/demo.png]"
+                            "b[CQ:at]c[CQ:reply]"
+                            "d[CQ:at,qq=对方QQ号]e[CQ:reply,id=原消息ID]"
+                        )
+                    },
+                },
+            ]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
 def test_send_does_not_reply_to_last_inbound_message(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
