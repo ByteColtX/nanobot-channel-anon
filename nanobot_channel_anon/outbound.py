@@ -103,7 +103,7 @@ def _build_mention_placeholder_segments(
 
 
 def _guess_media_segment_type(media_ref: str) -> str:
-    suffix = PurePosixPath(_media_path_from_media_ref(media_ref)).suffix.lower()
+    suffix = PurePosixPath(media_path_from_media_ref(media_ref)).suffix.lower()
     if suffix in _IMAGE_EXTENSIONS:
         return "image"
     if suffix in _VIDEO_EXTENSIONS:
@@ -117,11 +117,12 @@ def _normalize_media_ref(media_ref: str) -> str:
     normalized_media_ref = media_ref.strip()
     if not normalized_media_ref:
         raise ValueError("media ref is required")
-    _media_path_from_media_ref(normalized_media_ref)
+    media_path_from_media_ref(normalized_media_ref)
     return normalized_media_ref
 
 
-def _media_path_from_media_ref(media_ref: str) -> str:
+def media_path_from_media_ref(media_ref: str) -> str:
+    """Extract a usable path component from a local or resolved media ref."""
     parsed = urlparse(media_ref)
     if parsed.scheme == "file":
         path = unquote(parsed.path).strip()

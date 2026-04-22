@@ -11,7 +11,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote
 from uuid import uuid4
 
 import aiohttp
@@ -33,6 +33,7 @@ from nanobot_channel_anon.onebot import BotStatus, OneBotAPIRequest, OneBotRawEv
 from nanobot_channel_anon.outbound import (
     build_send_request,
     get_suppressed_outbound_reason,
+    media_path_from_media_ref,
 )
 from nanobot_channel_anon.router import InboundRouter
 from nanobot_channel_anon.serializer import serialize_buffer_chat
@@ -197,7 +198,7 @@ class AnonChannel(BaseChannel):
             raise RuntimeError(
                 f"OneBot action {action} failed: retcode={response.retcode}"
             )
-        self._buffer_outbound_message(msg, response)
+        self._buffer_outbound_message(msg, response, media=resolved_media)
 
     async def send_delta(
         self,
@@ -229,49 +230,55 @@ class AnonChannel(BaseChannel):
         if not normalized_media_ref:
             raise ValueError("media ref is required")
         if normalized_media_ref.startswith("file://"):
-            path = self._path_from_media_ref(normalized_media_ref)
-            if path.exists():
-                return await self._upload_outbound_file_via_stream(path)
-            return normalized_media_ref
-        local_path = Path(normalized_media_ref)
-        if local_path.is_absolute() and local_path.exists():
+            local_path = Path(media_path_from_media_ref(normalized_media_ref))
+        else:
+            local_path = Path(normalized_media_ref)
+            if not local_path.is_absolute():
+                return normalized_media_ref
+        try:
             return await self._upload_outbound_file_via_stream(local_path)
-        return normalized_media_ref
+        except FileNotFoundError:
+            return normalized_media_ref
 
     async def _upload_outbound_file_via_stream(self, path: Path) -> str:
-        resolved_path = path.resolve(strict=True)
-        file_size = resolved_path.stat().st_size
-        max_size = self.config.media_max_size_mb * 1024 * 1024
-        if file_size > max_size:
-            raise ValueError(
-                f"outbound media exceeds size limit: {resolved_path.name}"
+        resolved_path = path.resolve(strict=False)
+        with resolved_path.open("rb") as file_obj:
+            file_obj.seek(0, 2)
+            file_size = file_obj.tell()
+            max_size = self.config.media_max_size_mb * 1024 * 1024
+            if file_size > max_size:
+                raise ValueError(
+                    f"outbound media exceeds size limit: {resolved_path.name}"
+                )
+            file_obj.seek(0)
+            digest = hashlib.sha256()
+            while chunk := file_obj.read(_OUTBOUND_UPLOAD_CHUNK_SIZE):
+                digest.update(chunk)
+            total_chunks = max(
+                1,
+                (file_size + _OUTBOUND_UPLOAD_CHUNK_SIZE - 1)
+                // _OUTBOUND_UPLOAD_CHUNK_SIZE,
             )
-        body = resolved_path.read_bytes()
-        sha256 = hashlib.sha256(body).hexdigest()
-        total_chunks = max(
-            1,
-            (len(body) + _OUTBOUND_UPLOAD_CHUNK_SIZE - 1)
-            // _OUTBOUND_UPLOAD_CHUNK_SIZE,
-        )
-        stream_id = str(uuid4())
-        for chunk_index in range(total_chunks):
-            start = chunk_index * _OUTBOUND_UPLOAD_CHUNK_SIZE
-            end = start + _OUTBOUND_UPLOAD_CHUNK_SIZE
-            chunk = body[start:end]
-            response = await self._send_api_request(
-                "upload_file_stream",
-                {
-                    "stream_id": stream_id,
-                    "chunk_data": base64.b64encode(chunk).decode("ascii"),
-                    "chunk_index": chunk_index,
-                    "total_chunks": total_chunks,
-                    "file_size": file_size,
-                    "expected_sha256": sha256,
-                    "filename": resolved_path.name,
-                    "file_retention": _OUTBOUND_UPLOAD_FILE_RETENTION_MS,
-                },
-            )
-            self._ensure_outbound_upload_chunk_ok(response, filename=resolved_path.name)
+            file_obj.seek(0)
+            stream_id = str(uuid4())
+            for chunk_index in range(total_chunks):
+                chunk = file_obj.read(_OUTBOUND_UPLOAD_CHUNK_SIZE)
+                response = await self._send_api_request(
+                    "upload_file_stream",
+                    {
+                        "stream_id": stream_id,
+                        "chunk_data": base64.b64encode(chunk).decode("ascii"),
+                        "chunk_index": chunk_index,
+                        "total_chunks": total_chunks,
+                        "file_size": file_size,
+                        "expected_sha256": digest.hexdigest(),
+                        "filename": resolved_path.name,
+                        "file_retention": _OUTBOUND_UPLOAD_FILE_RETENTION_MS,
+                    },
+                )
+                self._ensure_outbound_upload_chunk_ok(
+                    response, filename=resolved_path.name
+                )
         completion = await self._send_api_request(
             "upload_file_stream",
             {"stream_id": stream_id, "is_complete": True},
@@ -309,16 +316,6 @@ class AnonChannel(BaseChannel):
                 f"upload_file_stream completion missing file_path for {filename}"
             )
         return file_path
-
-    @staticmethod
-    def _path_from_media_ref(media_ref: str) -> Path:
-        parsed = urlparse(media_ref)
-        if parsed.scheme != "file":
-            raise ValueError("media refs must use file:// URIs")
-        path = unquote(parsed.path).strip()
-        if not path:
-            raise ValueError("file:// media ref must include a path")
-        return Path(path)
 
     async def _connect_ws(self) -> aiohttp.ClientWebSocketResponse:
         session = self._require_session()
@@ -1327,6 +1324,8 @@ class AnonChannel(BaseChannel):
         self,
         msg: OutboundMessage,
         response: OneBotRawEvent,
+        *,
+        media: list[str] | None = None,
     ) -> None:
         data = response.data if isinstance(response.data, dict) else {}
         message_id = normalize_onebot_id(data.get("message_id"))
@@ -1341,7 +1340,7 @@ class AnonChannel(BaseChannel):
                 is_from_self=True,
                 content=msg.content,
                 sender_nickname=self._self_nickname,
-                media=list(msg.media),
+                media=list(msg.media if media is None else media),
                 reply_to_message_id=normalize_onebot_id(
                     msg.metadata.get("reply_to_message_id")
                 ),

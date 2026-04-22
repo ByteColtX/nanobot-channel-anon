@@ -4279,7 +4279,7 @@ def test_send_keeps_uploaded_media_in_buffer(
             )
             buffered = channel._buffer.get_chat_entries("private:1")
             assert buffered
-            assert buffered[-1].media == [str(media_path)]
+            assert buffered[-1].media == [uploaded_path]
         finally:
             await _stop_channel(channel, task, server)
 
