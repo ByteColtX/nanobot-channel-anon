@@ -168,9 +168,15 @@ def _find_action(
 class FakeDownloadResponse:
     """Minimal aiohttp-like response stub for media download tests."""
 
-    def __init__(self, body: bytes) -> None:
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        read_gate: asyncio.Event | None = None,
+    ) -> None:
         """Store the response body returned by read()."""
         self._body = body
+        self._read_gate = read_gate
 
     async def __aenter__(self) -> FakeDownloadResponse:
         """Enter the async context manager."""
@@ -186,6 +192,8 @@ class FakeDownloadResponse:
 
     async def read(self) -> bytes:
         """Return the configured response body."""
+        if self._read_gate is not None:
+            await self._read_gate.wait()
         return self._body
 
 
@@ -2788,6 +2796,180 @@ def test_private_voice_inbound_keeps_placeholder_when_transcoding_fails(
         "_transcode_voice_for_transcription",
         fake_transcode,
     )
+    monkeypatch.setattr(AnonChannel, "transcribe_audio", fake_transcribe)
+    asyncio.run(case())
+    assert transcribe_calls == []
+
+
+
+def test_private_image_inbound_keeps_placeholder_when_download_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Timed-out image downloads should keep placeholder-only content."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(channel_module, "_MEDIA_DOWNLOAD_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+                "media_max_size_mb": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9310",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "slow.png",
+                                "url": "https://example.com/slow.png",
+                                "file_size": "5",
+                            },
+                        }
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            buffered = channel._buffer.get("private:123", "9310")
+            assert buffered is not None
+            assert buffered.content == "[image]"
+            assert buffered.media == []
+            assert inbound.media == []
+            assert "M|9310|peer|[image]" in inbound.content
+            assert not (tmp_path / "media" / "slow.png").exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    read_gate = asyncio.Event()
+
+    def fake_get(
+        self: aiohttp.ClientSession,
+        url: str,
+        **kwargs: Any,
+    ) -> FakeDownloadResponse:
+        del self, url, kwargs
+        return FakeDownloadResponse(b"image", read_gate=read_gate)
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    asyncio.run(case())
+
+
+
+def test_private_voice_inbound_keeps_placeholder_when_transcoding_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Timed-out ffmpeg should keep placeholder-only voice content."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(channel_module, "_FFMPEG_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(
+        channel_module,
+        "get_media_dir",
+        lambda _channel: tmp_path / "media",
+    )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer()
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+                "media_max_size_mb": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "9311",
+                    "user_id": "123",
+                    "message": [
+                        {
+                            "type": "record",
+                            "data": {
+                                "file": "slow.amr",
+                                "url": "https://example.com/slow.amr",
+                                "file_size": "5",
+                            },
+                        }
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            buffered = channel._buffer.get("private:123", "9311")
+            assert buffered is not None
+            assert buffered.content == "[voice]"
+            assert "transcription_text" not in buffered.metadata["media_items"][0]
+            assert "M|9311|peer|[voice]" in inbound.content
+            assert not (tmp_path / "media" / "slow.wav").exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    def fake_get(
+        self: aiohttp.ClientSession,
+        url: str,
+        **kwargs: Any,
+    ) -> FakeDownloadResponse:
+        del self, url, kwargs
+        return FakeDownloadResponse(b"voice")
+
+    class HangingProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self._killed = asyncio.Event()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await self._killed.wait()
+            return b"", b""
+
+        def kill(self) -> None:
+            self.returncode = -9
+            self._killed.set()
+
+    async def fake_subprocess_exec(*args: Any, **kwargs: Any) -> HangingProcess:
+        del args, kwargs
+        return HangingProcess()
+
+    transcribe_calls: list[Path] = []
+
+    async def fake_transcribe(self: AnonChannel, file_path: str | Path) -> str:
+        del self
+        transcribe_calls.append(Path(file_path))
+        return "不应调用"
+
+    monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess_exec)
     monkeypatch.setattr(AnonChannel, "transcribe_audio", fake_transcribe)
     asyncio.run(case())
     assert transcribe_calls == []

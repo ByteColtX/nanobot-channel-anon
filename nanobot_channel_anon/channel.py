@@ -43,6 +43,9 @@ _PING_INTERVAL_S = 30.0
 _READ_TIMEOUT_S = 60.0
 _API_TIMEOUT_S = 5.0
 _RECONNECT_INTERVAL_S = 5.0
+_SESSION_QUEUE_MAX_SIZE = 64
+_MEDIA_DOWNLOAD_TIMEOUT_S = 30.0
+_FFMPEG_TIMEOUT_S = 30.0
 _INBOUND_CACHE_PATH = Path(".anon_inbound_buffer.json")
 _SUPPORTED_TRANSCRIPTION_SUFFIXES = {
     ".flac",
@@ -531,10 +534,16 @@ class AnonChannel(BaseChannel):
     async def _enqueue_inbound_event(self, payload: OneBotRawEvent) -> None:
         if self._should_stop():
             return
-        worker = await self._get_or_create_session_worker(
-            self._session_worker_key_for_payload(payload)
-        )
-        await worker.queue.put(payload)
+        key = self._session_worker_key_for_payload(payload)
+        worker = await self._get_or_create_session_worker(key)
+        try:
+            worker.queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            logger.warning(
+                "Anon dropped inbound event for session {}: queue is full (max={})",
+                key,
+                _SESSION_QUEUE_MAX_SIZE,
+            )
 
     async def _get_or_create_session_worker(self, key: str) -> _SessionWorker:
         async with self._session_workers_lock:
@@ -543,7 +552,7 @@ class AnonChannel(BaseChannel):
                 return existing
 
             worker = _SessionWorker(
-                queue=asyncio.Queue(),
+                queue=asyncio.Queue(maxsize=_SESSION_QUEUE_MAX_SIZE),
                 task=asyncio.create_task(self._run_session_worker(key)),
             )
             self._session_workers[key] = worker
@@ -797,7 +806,25 @@ class AnonChannel(BaseChannel):
             )
             return None
 
-        _, stderr = await process.communicate()
+        try:
+            _, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=_FFMPEG_TIMEOUT_S,
+            )
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            with contextlib.suppress(Exception):
+                await process.communicate()
+            with contextlib.suppress(FileNotFoundError):
+                target_path.unlink()
+            logger.warning(
+                "Anon voice transcoding timed out for {} after {}s",
+                source_path,
+                _FFMPEG_TIMEOUT_S,
+            )
+            return None
+
         if process.returncode != 0:
             with contextlib.suppress(FileNotFoundError):
                 target_path.unlink()
@@ -837,9 +864,25 @@ class AnonChannel(BaseChannel):
             return None
 
         session = self._require_session()
-        async with session.get(url) as response:
-            response.raise_for_status()
-            target_path.write_bytes(await response.read())
+        try:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=_MEDIA_DOWNLOAD_TIMEOUT_S),
+            ) as response:
+                response.raise_for_status()
+                body = await asyncio.wait_for(
+                    response.read(),
+                    timeout=_MEDIA_DOWNLOAD_TIMEOUT_S,
+                )
+        except TimeoutError:
+            logger.warning(
+                "Anon inbound media download timed out for {} after {}s",
+                url,
+                _MEDIA_DOWNLOAD_TIMEOUT_S,
+            )
+            return None
+
+        target_path.write_bytes(body)
         return target_path
 
     @staticmethod

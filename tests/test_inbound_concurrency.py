@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 
+import nanobot_channel_anon.channel as channel_module
 from nanobot_channel_anon.buffer import MessageEntry
 from nanobot_channel_anon.channel import AnonChannel
 from nanobot_channel_anon.config import AnonConfig
@@ -27,6 +29,7 @@ class ControlledAnonChannel(AnonChannel):
         *,
         bus: MessageBus,
         image_gates: dict[str, asyncio.Event] | None = None,
+        before_handle_event: Callable[[OneBotRawEvent], Awaitable[None]] | None = None,
     ) -> None:
         """Initialize a test channel with optional image blocking gates."""
         super().__init__(
@@ -38,6 +41,7 @@ class ControlledAnonChannel(AnonChannel):
             bus,
         )
         self._image_gates = image_gates or {}
+        self._before_handle_event = before_handle_event
         self._image_started = {
             token: asyncio.Event() for token in self._image_gates
         }
@@ -63,6 +67,11 @@ class ControlledAnonChannel(AnonChannel):
     ) -> dict[str, str] | None:
         del media_item
         return None
+
+    async def _handle_inbound_event(self, payload: OneBotRawEvent) -> None:
+        if self._before_handle_event is not None:
+            await self._before_handle_event(payload)
+        await super()._handle_inbound_event(payload)
 
     async def _wait_for_image_download(self, token: str) -> None:
         """Wait until a controlled image download starts."""
@@ -332,4 +341,98 @@ def test_stop_cancels_session_workers_and_drops_queued_messages() -> None:
             slow_gate.set()
             await channel.stop()
 
+    asyncio.run(case())
+
+
+def test_session_queue_drops_new_events_when_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full per-session queues should drop new inbound events without blocking."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def before_handle_event(payload: OneBotRawEvent) -> None:
+            if payload.message_id == "1":
+                first_started.set()
+                await release_first.wait()
+
+        channel = ControlledAnonChannel(
+            bus=bus,
+            before_handle_event=before_handle_event,
+        )
+        first = _group_event("1", text="first")
+        second = _group_event("2", text="second")
+        dropped = _group_event("3", text="third")
+
+        try:
+            await channel._enqueue_inbound_event(first)
+            await first_started.wait()
+            await channel._enqueue_inbound_event(second)
+            await channel._enqueue_inbound_event(dropped)
+
+            release_first.set()
+            published = await _consume_published(bus, 2)
+            assert [msg.metadata["cqmsg_message_ids"] for msg in published] == [
+                ["1"],
+                ["2"],
+            ]
+            await _assert_no_publish(bus)
+        finally:
+            release_first.set()
+            await channel.stop()
+
+    monkeypatch.setattr(channel_module, "_SESSION_QUEUE_MAX_SIZE", 1)
+    asyncio.run(case())
+
+
+def test_session_queue_drop_is_non_blocking_for_other_chats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full hot-chat queue should not block enqueueing another chat."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def before_handle_event(payload: OneBotRawEvent) -> None:
+            if payload.group_id == "456" and payload.message_id == "1":
+                first_started.set()
+                await release_first.wait()
+
+        channel = ControlledAnonChannel(
+            bus=bus,
+            before_handle_event=before_handle_event,
+        )
+        hot_first = _group_event("1", text="hot-1", group_id="456")
+        hot_second = _group_event("2", text="hot-2", group_id="456")
+        hot_dropped = _group_event("3", text="hot-3", group_id="456")
+        other_chat = _group_event("9", text="fast", group_id="789")
+
+        try:
+            await channel._enqueue_inbound_event(hot_first)
+            await first_started.wait()
+            await channel._enqueue_inbound_event(hot_second)
+            await channel._enqueue_inbound_event(hot_dropped)
+            await channel._enqueue_inbound_event(other_chat)
+
+            first_published = await _consume_published(bus, 1)
+            assert first_published[0].chat_id == "group:789"
+            assert first_published[0].metadata["cqmsg_message_ids"] == ["9"]
+
+            release_first.set()
+            remaining = await _consume_published(bus, 2)
+            assert [msg.metadata["cqmsg_message_ids"] for msg in remaining] == [
+                ["1"],
+                ["2"],
+            ]
+            await _assert_no_publish(bus)
+        finally:
+            release_first.set()
+            await channel.stop()
+
+    monkeypatch.setattr(channel_module, "_SESSION_QUEUE_MAX_SIZE", 1)
     asyncio.run(case())
