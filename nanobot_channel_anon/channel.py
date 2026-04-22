@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,9 @@ class AnonChannel(BaseChannel):
         self._echo_counter = 0
         self._self_id: str | None = None
         self._self_nickname: str = ""
+        self._muted_groups: dict[str, int] = {}
+        self._group_mute_state_ready = asyncio.Event()
+        self._group_mute_state_ready.set()
         self._buffer = Buffer(self.config.max_context_messages)
         self._router = InboundRouter(self.config)
         self._inbound_cache_path = _INBOUND_CACHE_PATH
@@ -133,7 +137,13 @@ class AnonChannel(BaseChannel):
                 reader_task = asyncio.create_task(self._listen_loop(ws))
                 self._reader_task = reader_task
                 self._ping_task = asyncio.create_task(self._ping_loop(ws))
-                await self._fetch_self_id()
+                self._group_mute_state_ready.clear()
+                self._muted_groups.clear()
+                try:
+                    await self._fetch_self_id()
+                    await self._refresh_group_mute_states()
+                finally:
+                    self._group_mute_state_ready.set()
 
                 disconnect_reason = "WebSocket reader exited"
                 try:
@@ -371,7 +381,198 @@ class AnonChannel(BaseChannel):
         """Return whether the sender can use admin-only slash commands."""
         return sender_id in self.config.super_admins
 
+    @staticmethod
+    def _int_value(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        return None
+
+    async def _refresh_group_mute_states(self) -> None:
+        if self._self_id is None:
+            return
+
+        try:
+            response = await self._send_api_request(
+                "get_group_list",
+                {"no_cache": False},
+            )
+        except Exception as exc:
+            if self._should_stop():
+                logger.debug("Anon skipped group mute sync during shutdown")
+                return
+            logger.warning("Anon get_group_list failed during mute sync: {}", exc)
+            return
+
+        if response.status == "failed" or str(response.retcode or "") not in {"", "0"}:
+            logger.warning(
+                (
+                    "Anon get_group_list returned failure during mute sync: "
+                    "status={} retcode={}"
+                ),
+                response.status,
+                response.retcode,
+            )
+            return
+
+        groups = response.data
+        if not isinstance(groups, list):
+            logger.warning("Anon get_group_list returned invalid data during mute sync")
+            return
+
+        muted_groups: dict[str, int] = {}
+        for item in groups:
+            if not isinstance(item, dict):
+                continue
+            group_id = normalize_onebot_id(item.get("group_id"))
+            if group_id is None:
+                continue
+            muted_until = await self._fetch_group_muted_until(group_id)
+            if muted_until is not None:
+                muted_groups[group_id] = muted_until
+                logger.info(
+                    "Anon mute sync marked group as muted: group_id={} muted_until={}",
+                    group_id,
+                    muted_until,
+                )
+
+        self._muted_groups = muted_groups
+        logger.info(
+            "Anon mute sync completed: scanned_groups={} muted_groups={}",
+            len(groups),
+            len(muted_groups),
+        )
+
+    async def _fetch_group_muted_until(self, group_id: str) -> int | None:
+        try:
+            response = await self._send_api_request(
+                "get_group_shut_list",
+                {"group_id": group_id},
+            )
+        except Exception as exc:
+            if self._should_stop():
+                logger.debug("Anon skipped get_group_shut_list during shutdown")
+                return None
+            logger.warning(
+                "Anon get_group_shut_list failed for group {}: {}",
+                group_id,
+                exc,
+            )
+            return None
+
+        if response.status == "failed" or str(response.retcode or "") not in {"", "0"}:
+            logger.warning(
+                (
+                    "Anon get_group_shut_list returned failure for group {}: "
+                    "status={} retcode={}"
+                ),
+                group_id,
+                response.status,
+                response.retcode,
+            )
+            return None
+
+        entries = response.data
+        if not isinstance(entries, list):
+            logger.warning(
+                "Anon get_group_shut_list returned invalid data for group {}",
+                group_id,
+            )
+            return None
+
+        now = int(time.time())
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            user_id = normalize_onebot_id(item.get("uin"))
+            if user_id != self._self_id:
+                continue
+            muted_until = self._int_value(item.get("shutUpTime"))
+            if muted_until is None or muted_until <= now:
+                return None
+            return muted_until
+        return None
+
+    def _handle_group_ban_notice(self, payload: OneBotRawEvent) -> bool:
+        if payload.post_type != "notice" or payload.notice_type != "group_ban":
+            return False
+
+        group_id = normalize_onebot_id(payload.group_id)
+        if group_id is None:
+            return True
+
+        self_id = normalize_onebot_id(payload.self_id) or self._self_id
+        user_id = normalize_onebot_id(payload.user_id)
+        if self_id is None or user_id != self_id:
+            return True
+
+        if payload.sub_type == "lift_ban":
+            self._muted_groups.pop(group_id, None)
+            logger.info("Anon bot mute lifted: group_id={}", group_id)
+            return True
+
+        if payload.sub_type != "ban":
+            return True
+
+        event_time = self._int_value(payload.time)
+        duration = self._int_value(getattr(payload, "duration", None))
+        if event_time is None or duration is None:
+            logger.warning(
+                (
+                    "Anon ignored malformed bot mute notice: "
+                    "group_id={} time={} duration={}"
+                ),
+                group_id,
+                payload.time,
+                getattr(payload, "duration", None),
+            )
+            return True
+
+        muted_until = event_time + duration
+        self._muted_groups[group_id] = muted_until
+        logger.info(
+            "Anon bot muted in group: group_id={} duration={} muted_until={}",
+            group_id,
+            duration,
+            muted_until,
+        )
+        return True
+
+    async def _wait_for_group_mute_state(self) -> None:
+        if self._group_mute_state_ready.is_set():
+            return
+        await self._group_mute_state_ready.wait()
+
+    def _is_group_muted(self, group_id: str) -> bool:
+        muted_until = self._muted_groups.get(group_id)
+        if muted_until is None:
+            return False
+        now = int(time.time())
+        if muted_until <= now:
+            self._muted_groups.pop(group_id, None)
+            logger.info(
+                "Anon cleared expired mute state: group_id={} muted_until={}",
+                group_id,
+                muted_until,
+            )
+            return False
+        return True
+
     async def _handle_inbound_event(self, payload: OneBotRawEvent) -> None:
+        if self._handle_group_ban_notice(payload):
+            return
+
         candidate = normalize_inbound_event(
             payload,
             config=self.config,
@@ -388,6 +589,17 @@ class AnonChannel(BaseChannel):
                 payload.notice_type,
             )
             return
+
+        if candidate.event_kind == "group_message":
+            await self._wait_for_group_mute_state()
+            group_id = normalize_onebot_id(candidate.metadata.get("group_id"))
+            if group_id is not None and self._is_group_muted(group_id):
+                logger.info(
+                    "Anon ignored muted group inbound: group_id={} sender_id={}",
+                    group_id,
+                    candidate.sender_id,
+                )
+                return
 
         slash_command = self._extract_slash_command(candidate)
         candidate.metadata["slash_command"] = slash_command

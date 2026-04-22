@@ -146,6 +146,28 @@ def test_normalize_notice_poke() -> None:
     assert candidate.metadata["message_id"] == "notice:poke:1776818315:456:123:42"
 
 
+def test_onebot_raw_event_parses_group_ban_notice_fields() -> None:
+    """Group ban notices should keep duration and operator fields."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "notice",
+            "notice_type": "group_ban",
+            "sub_type": "ban",
+            "time": 1776821686,
+            "self_id": 42,
+            "group_id": 456,
+            "user_id": 42,
+            "operator_id": 7,
+            "duration": 600,
+        }
+    )
+
+    assert raw.notice_type == "group_ban"
+    assert raw.sub_type == "ban"
+    assert raw.operator_id == 7
+    assert raw.duration == 600
+
+
 def test_normalize_forward_segment_collects_forward_refs() -> None:
     """Forward segments should keep refs and placeholder text."""
     raw = OneBotRawEvent.model_validate(

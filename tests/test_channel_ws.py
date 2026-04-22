@@ -104,12 +104,35 @@ class OneBotWebSocketServer:
         ws: web.WebSocketResponse,
     ) -> None:
         self.actions.append(payload)
+        handled = False
         if payload.get("action") == "get_login_info":
             response = dict(self.login_info_response)
             response["echo"] = payload["echo"]
             await ws.send_json(response)
+            handled = True
         if self.on_action is not None:
-            await self.on_action(self, payload, ws)
+            handled = bool(await self.on_action(self, payload, ws)) or handled
+        if handled:
+            return
+        if payload.get("action") == "get_group_list":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [],
+                    "echo": payload["echo"],
+                }
+            )
+            return
+        if payload.get("action") == "get_group_shut_list":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [],
+                    "echo": payload["echo"],
+                }
+            )
 
 
 async def _wait_for(predicate: Any, timeout: float = 1.0) -> Any:
@@ -163,6 +186,13 @@ def _find_action(
     action_name: str,
 ) -> dict[str, Any]:
     return next(item for item in server.actions if item["action"] == action_name)
+
+
+def _find_actions(
+    server: OneBotWebSocketServer,
+    action_name: str,
+) -> list[dict[str, Any]]:
+    return [item for item in server.actions if item["action"] == action_name]
 
 
 class FakeDownloadResponse:
@@ -1564,6 +1594,351 @@ def test_group_inbound_rejects_unlisted_sender_and_group(
                 await _consume_inbound(bus, timeout=0.2)
             assert channel._buffer.get("group:2", "9104") is None
             assert not channel._inbound_cache_path.exists()
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_cold_start_group_mute_sync_blocks_muted_group_inbound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cold-start sync should block group inbound when the bot is muted."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") == "get_group_list":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [{"group_id": "2"}],
+                    "echo": payload["echo"],
+                }
+            )
+            return
+        if payload.get("action") == "get_group_shut_list":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [{"uin": "42", "shutUpTime": 4102444800}],
+                    "echo": payload["echo"],
+                }
+            )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["2"],
+                "group_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await _wait_for(lambda: channel._muted_groups == {"2": 4102444800})
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "mute-1",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "raw_message": "hello muted group",
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            assert channel._buffer.get("group:2", "mute-1") is None
+            assert not channel._inbound_cache_path.exists()
+            assert _find_action(server, "get_group_list")["params"] == {
+                "no_cache": False
+            }
+            assert _find_action(server, "get_group_shut_list")["params"] == {
+                "group_id": "2"
+            }
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_group_ban_notice_blocks_and_lift_ban_restores_group_inbound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Group ban notices should update muted state immediately."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") == "get_group_list":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [{"group_id": "2"}],
+                    "echo": payload["echo"],
+                }
+            )
+            return
+        if payload.get("action") == "get_group_shut_list":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [],
+                    "echo": payload["echo"],
+                }
+            )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["2"],
+                "group_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await _wait_for(lambda: channel._group_mute_state_ready.is_set())
+            await server.send_json(
+                {
+                    "post_type": "notice",
+                    "notice_type": "group_ban",
+                    "sub_type": "ban",
+                    "time": 4102444200,
+                    "self_id": "42",
+                    "group_id": "2",
+                    "user_id": "42",
+                    "operator_id": "7",
+                    "duration": 600,
+                }
+            )
+            await _wait_for(lambda: channel._muted_groups.get("2") == 4102444800)
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "mute-2",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "raw_message": "still muted",
+                }
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await _consume_inbound(bus, timeout=0.2)
+            assert channel._buffer.get("group:2", "mute-2") is None
+
+            await server.send_json(
+                {
+                    "post_type": "notice",
+                    "notice_type": "group_ban",
+                    "sub_type": "lift_ban",
+                    "time": 1776821666,
+                    "self_id": "42",
+                    "group_id": "2",
+                    "user_id": "42",
+                    "operator_id": "7",
+                    "duration": 0,
+                }
+            )
+            await _wait_for(lambda: "2" not in channel._muted_groups)
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "mute-3",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "raw_message": "restored",
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            assert inbound.chat_id == "group:2"
+            assert inbound.metadata["cqmsg_message_ids"] == ["mute-3"]
+            assert channel._buffer.get("group:2", "mute-3") is not None
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_other_user_group_ban_notice_does_not_block_group_inbound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Group ban notices for other users should not affect the bot state."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") == "get_group_list":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [{"group_id": "2"}],
+                    "echo": payload["echo"],
+                }
+            )
+            return
+        if payload.get("action") == "get_group_shut_list":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [],
+                    "echo": payload["echo"],
+                }
+            )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["2"],
+                "group_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "notice",
+                    "notice_type": "group_ban",
+                    "sub_type": "ban",
+                    "time": 1776821686,
+                    "self_id": "42",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "operator_id": "7",
+                    "duration": 600,
+                }
+            )
+            await asyncio.sleep(0.05)
+            assert channel._muted_groups == {}
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "mute-4",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "raw_message": "allowed",
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            assert inbound.chat_id == "group:2"
+            assert inbound.metadata["cqmsg_message_ids"] == ["mute-4"]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_expired_muted_group_entry_is_cleared_before_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Expired muted-group entries should not keep blocking inbound."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") == "get_group_list":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [{"group_id": "2"}],
+                    "echo": payload["echo"],
+                }
+            )
+            return
+        if payload.get("action") == "get_group_shut_list":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [{"uin": "42", "shutUpTime": 1}],
+                    "echo": payload["echo"],
+                }
+            )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["2"],
+                "group_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            assert channel._muted_groups == {}
+            channel._muted_groups["2"] = 1
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "mute-5",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "raw_message": "expired mute",
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            assert inbound.chat_id == "group:2"
+            assert inbound.metadata["cqmsg_message_ids"] == ["mute-5"]
+            assert "2" not in channel._muted_groups
         finally:
             await _stop_channel(channel, task, server)
 

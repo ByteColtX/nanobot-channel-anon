@@ -60,6 +60,8 @@ class OneBotRawEvent(OneBotModel):
     time: int | float | str | None = None
     meta_event_type: str = ""
     notice_type: str = ""
+    operator_id: int | str | None = None
+    duration: int | float | str | None = None
     echo: str = ""
     retcode: int | str | None = None
     status: str | BotStatus | None = None
