@@ -4071,8 +4071,10 @@ def test_send_delta_sends_plain_text_message(monkeypatch: pytest.MonkeyPatch) ->
     asyncio.run(case())
 
 
-def test_send_routes_file_media_segments(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pre-resolved media refs should map to OneBot media segment types."""
+def test_send_splits_non_image_media_from_caption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-image media should be sent separately and caption should be text-only."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def on_action(
@@ -4080,8 +4082,7 @@ def test_send_routes_file_media_segments(monkeypatch: pytest.MonkeyPatch) -> Non
         payload: dict[str, Any],
         ws: web.WebSocketResponse,
     ) -> bool:
-        del server
-        await _reply_to_send_action(payload, ws)
+        await _reply_to_send_action(payload, ws, message_id=9000 + len(server.actions))
         return payload.get("action") in {"send_private_msg", "send_group_msg"}
 
     async def case() -> None:
@@ -4105,13 +4106,13 @@ def test_send_routes_file_media_segments(monkeypatch: pytest.MonkeyPatch) -> Non
                     metadata={"source": "resolved"},
                 )
             )
-            action = _find_action(server, "send_private_msg")
-            assert action["params"]["message"] == [
-                {"type": "image", "data": {"file": "/napcat/a.png"}},
-                {"type": "video", "data": {"file": "/napcat/b.mp4"}},
-                {"type": "record", "data": {"file": "/napcat/c.mp3"}},
-                {"type": "file", "data": {"file": "/napcat/d.zip"}},
-                {"type": "text", "data": {"text": "caption"}},
+            actions = _find_actions(server, "send_private_msg")
+            assert [action["params"]["message"] for action in actions] == [
+                [{"type": "image", "data": {"file": "/napcat/a.png"}}],
+                [{"type": "video", "data": {"file": "/napcat/b.mp4"}}],
+                [{"type": "record", "data": {"file": "/napcat/c.mp3"}}],
+                [{"type": "file", "data": {"file": "/napcat/d.zip"}}],
+                [{"type": "text", "data": {"text": "caption"}}],
             ]
             assert not _find_actions(server, "upload_file_stream")
         finally:
@@ -4120,11 +4121,11 @@ def test_send_routes_file_media_segments(monkeypatch: pytest.MonkeyPatch) -> Non
     asyncio.run(case())
 
 
-def test_send_uploads_local_media_then_sends_message(
+def test_send_uploads_local_image_then_sends_caption_message(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Local outbound media should stream-upload before send_private_msg."""
+    """Local outbound images may still be sent together with caption text."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     media_path = tmp_path / "sample.png"
@@ -4217,23 +4218,22 @@ def test_send_uploads_local_media_then_sends_message(
     asyncio.run(case())
 
 
-def test_send_keeps_uploaded_media_in_buffer(
+def test_send_keeps_uploaded_media_in_split_buffer_entries(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Buffered outbound media should store the resolved uploaded path."""
+    """Buffered outbound split sends should store per-message content and media."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
-    media_path = tmp_path / "buffer.png"
+    media_path = tmp_path / "buffer.wav"
     media_path.write_bytes(b"buffer-me")
-    uploaded_path = "/napcat/cache/buffer.png"
+    uploaded_path = "/napcat/cache/buffer.wav"
 
     async def on_action(
         server: OneBotWebSocketServer,
         payload: dict[str, Any],
         ws: web.WebSocketResponse,
     ) -> bool:
-        del server
         if payload.get("action") == "upload_file_stream":
             params = payload["params"]
             if params.get("is_complete"):
@@ -4258,7 +4258,11 @@ def test_send_keeps_uploaded_media_in_buffer(
                 }
             )
             return True
-        await _reply_to_send_action(payload, ws, message_id=9123)
+        await _reply_to_send_action(
+            payload,
+            ws,
+            message_id=9120 + len(_find_actions(server, "send_private_msg")),
+        )
         return payload.get("action") in {"send_private_msg", "send_group_msg"}
 
     async def case() -> None:
@@ -4278,8 +4282,13 @@ def test_send_keeps_uploaded_media_in_buffer(
                 )
             )
             buffered = channel._buffer.get_chat_entries("private:1")
-            assert buffered
-            assert buffered[-1].media == [uploaded_path]
+            assert len(buffered) == 2
+            assert buffered[0].content == ""
+            assert buffered[0].media == [uploaded_path]
+            assert buffered[0].segment_types == ["record"]
+            assert buffered[1].content == "caption"
+            assert buffered[1].media == []
+            assert buffered[1].segment_types == ["text"]
         finally:
             await _stop_channel(channel, task, server)
 

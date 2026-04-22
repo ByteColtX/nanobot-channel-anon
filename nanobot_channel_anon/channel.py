@@ -34,6 +34,7 @@ from nanobot_channel_anon.outbound import (
     build_send_request,
     get_suppressed_outbound_reason,
     media_path_from_media_ref,
+    split_outbound_batches,
 )
 from nanobot_channel_anon.router import InboundRouter
 from nanobot_channel_anon.serializer import serialize_buffer_chat
@@ -187,18 +188,28 @@ class AnonChannel(BaseChannel):
             )
             return
         resolved_media = await self._resolve_outbound_media_refs(msg.media)
-        action, params = build_send_request(
-            msg.chat_id,
+        metadata = dict(msg.metadata)
+        for batch_content, batch_media in split_outbound_batches(
             msg.content,
-            media=resolved_media,
-            metadata=msg.metadata,
-        )
-        response = await self._send_api_request(action, params)
-        if response.status == "failed":
-            raise RuntimeError(
-                f"OneBot action {action} failed: retcode={response.retcode}"
+            resolved_media,
+        ):
+            action, params = build_send_request(
+                msg.chat_id,
+                batch_content,
+                media=batch_media,
+                metadata=metadata,
             )
-        self._buffer_outbound_message(msg, response, media=resolved_media)
+            response = await self._send_api_request(action, params)
+            if response.status == "failed":
+                raise RuntimeError(
+                    f"OneBot action {action} failed: retcode={response.retcode}"
+                )
+            self._buffer_outbound_message(
+                msg,
+                response,
+                content=batch_content,
+                media=batch_media,
+            )
 
     async def send_delta(
         self,
@@ -1320,17 +1331,35 @@ class AnonChannel(BaseChannel):
         resolved = path.resolve(strict=False)
         return f"file://{quote(resolved.as_posix(), safe='/:.-_~')}"
 
+    @staticmethod
+    def _segment_type_for_outbound_media(media_ref: str) -> str:
+        suffix = Path(media_path_from_media_ref(media_ref)).suffix.lower()
+        if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
+            return "image"
+        if suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+            return "video"
+        if suffix in {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"}:
+            return "record"
+        return "file"
+
     def _buffer_outbound_message(
         self,
         msg: OutboundMessage,
         response: OneBotRawEvent,
         *,
+        content: str | None = None,
         media: list[str] | None = None,
     ) -> None:
         data = response.data if isinstance(response.data, dict) else {}
         message_id = normalize_onebot_id(data.get("message_id"))
         if message_id is None:
             return
+        buffered_content = msg.content if content is None else content
+        buffered_media = list(msg.media if media is None else media)
+        segment_types = ["text"] if buffered_content else []
+        segment_types.extend(
+            [self._segment_type_for_outbound_media(item) for item in buffered_media]
+        )
         self._buffer.add(
             MessageEntry(
                 message_id=message_id,
@@ -1338,13 +1367,13 @@ class AnonChannel(BaseChannel):
                 sender_id=self._self_id or "",
                 sender_name=self._self_nickname or self._self_id or "",
                 is_from_self=True,
-                content=msg.content,
+                content=buffered_content,
                 sender_nickname=self._self_nickname,
-                media=list(msg.media if media is None else media),
+                media=buffered_media,
                 reply_to_message_id=normalize_onebot_id(
                     msg.metadata.get("reply_to_message_id")
                 ),
-                segment_types=["text"] if msg.content else [],
+                segment_types=segment_types,
                 metadata=dict(msg.metadata),
             )
         )

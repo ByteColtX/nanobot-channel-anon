@@ -77,7 +77,7 @@ def build_message_segments(
     for media_ref in media:
         segments.append(
             OneBotMessageSegment(
-                type=_guess_media_segment_type(media_ref),
+                type=guess_media_segment_type(media_ref),
                 data={"file": _normalize_media_ref(media_ref)},
             )
         )
@@ -86,6 +86,31 @@ def build_message_segments(
         segments.append(OneBotMessageSegment(type="text", data={"text": content}))
 
     return segments
+
+
+def split_outbound_batches(
+    content: str,
+    media: list[str],
+) -> list[tuple[str, list[str]]]:
+    """Split outbound content into NapCat-compatible send batches."""
+    batches: list[tuple[str, list[str]]] = []
+    image_batch: list[str] = []
+
+    for media_ref in media:
+        if guess_media_segment_type(media_ref) == "image":
+            image_batch.append(media_ref)
+            continue
+        if image_batch:
+            batches.append(("", image_batch))
+            image_batch = []
+        batches.append(("", [media_ref]))
+
+    if image_batch:
+        batches.append((content, image_batch))
+    elif content:
+        batches.append((content, []))
+
+    return batches
 
 
 def _build_reply_placeholder_segments(
@@ -102,7 +127,8 @@ def _build_mention_placeholder_segments(
     return []
 
 
-def _guess_media_segment_type(media_ref: str) -> str:
+def guess_media_segment_type(media_ref: str) -> str:
+    """Guess the OneBot segment type for a resolved media ref."""
     suffix = PurePosixPath(media_path_from_media_ref(media_ref)).suffix.lower()
     if suffix in _IMAGE_EXTENSIONS:
         return "image"

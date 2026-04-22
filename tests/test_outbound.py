@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from nanobot_channel_anon.outbound import get_suppressed_outbound_reason
+from nanobot_channel_anon.outbound import (
+    get_suppressed_outbound_reason,
+    split_outbound_batches,
+)
 
 
 def test_get_suppressed_outbound_reason_matches_known_fallbacks() -> None:
@@ -70,3 +73,36 @@ def test_get_suppressed_outbound_reason_preserves_allowed_text() -> None:
     assert get_suppressed_outbound_reason("Stopped 1 task(s).") is None
     assert get_suppressed_outbound_reason("No active task to stop.") is None
     assert get_suppressed_outbound_reason("Dreaming...") is None
+
+
+def test_split_outbound_batches_keeps_images_with_caption() -> None:
+    """Images may still be sent together with caption text."""
+    assert split_outbound_batches(
+        "caption",
+        ["/napcat/a.png", "/napcat/b.jpg"],
+    ) == [("caption", ["/napcat/a.png", "/napcat/b.jpg"])]
+
+
+def test_split_outbound_batches_splits_non_image_media() -> None:
+    """Voice, video, and files should be sent separately from text."""
+    assert split_outbound_batches(
+        "caption",
+        ["/napcat/a.wav", "/napcat/b.mp4", "/napcat/c.zip"],
+    ) == [
+        ("", ["/napcat/a.wav"]),
+        ("", ["/napcat/b.mp4"]),
+        ("", ["/napcat/c.zip"]),
+        ("caption", []),
+    ]
+
+
+def test_split_outbound_batches_preserves_media_order_around_images() -> None:
+    """Mixed media should preserve original order while keeping caption legal."""
+    assert split_outbound_batches(
+        "caption",
+        ["/napcat/a.png", "/napcat/b.wav", "/napcat/c.jpg"],
+    ) == [
+        ("", ["/napcat/a.png"]),
+        ("", ["/napcat/b.wav"]),
+        ("caption", ["/napcat/c.jpg"]),
+    ]
