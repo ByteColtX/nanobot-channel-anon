@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from nanobot_channel_anon.onebot import OneBotMessageSegment
 from nanobot_channel_anon.utils import parse_chat_id
@@ -68,7 +68,7 @@ def build_message_segments(
     media: list[str],
     metadata: dict[str, Any] | None = None,
 ) -> list[OneBotMessageSegment]:
-    """Build OneBot segments for text and file:// media outbound."""
+    """Build OneBot segments for text and resolved media outbound."""
     segments = [
         *_build_reply_placeholder_segments(metadata),
         *_build_mention_placeholder_segments(metadata),
@@ -103,7 +103,7 @@ def _build_mention_placeholder_segments(
 
 
 def _guess_media_segment_type(media_ref: str) -> str:
-    suffix = PurePosixPath(_media_path_from_file_uri(media_ref)).suffix.lower()
+    suffix = PurePosixPath(_media_path_from_media_ref(media_ref)).suffix.lower()
     if suffix in _IMAGE_EXTENSIONS:
         return "image"
     if suffix in _VIDEO_EXTENSIONS:
@@ -117,17 +117,23 @@ def _normalize_media_ref(media_ref: str) -> str:
     normalized_media_ref = media_ref.strip()
     if not normalized_media_ref:
         raise ValueError("media ref is required")
-    if not normalized_media_ref.startswith("file://"):
-        raise ValueError("media refs must use file:// URIs")
-    _media_path_from_file_uri(normalized_media_ref)
+    _media_path_from_media_ref(normalized_media_ref)
     return normalized_media_ref
 
 
-def _media_path_from_file_uri(media_ref: str) -> str:
+def _media_path_from_media_ref(media_ref: str) -> str:
     parsed = urlparse(media_ref)
-    if parsed.scheme != "file":
-        raise ValueError("media refs must use file:// URIs")
-    path = parsed.path.strip()
+    if parsed.scheme == "file":
+        path = unquote(parsed.path).strip()
+        if not path:
+            raise ValueError("file:// media ref must include a path")
+        return path
+    if parsed.scheme:
+        path = parsed.path.strip()
+        if not path:
+            raise ValueError("media ref must include a path")
+        return path
+    path = media_ref.strip()
     if not path:
-        raise ValueError("file:// media ref must include a path")
+        raise ValueError("media ref is required")
     return path

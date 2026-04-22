@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -4070,16 +4072,17 @@ def test_send_delta_sends_plain_text_message(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_send_routes_file_media_segments(monkeypatch: pytest.MonkeyPatch) -> None:
-    """file:// media refs should map to OneBot media segment types."""
+    """Pre-resolved media refs should map to OneBot media segment types."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
     async def on_action(
         server: OneBotWebSocketServer,
         payload: dict[str, Any],
         ws: web.WebSocketResponse,
-    ) -> None:
+    ) -> bool:
         del server
         await _reply_to_send_action(payload, ws)
+        return payload.get("action") in {"send_private_msg", "send_group_msg"}
 
     async def case() -> None:
         server = OneBotWebSocketServer(on_action=on_action)
@@ -4094,19 +4097,118 @@ def test_send_routes_file_media_segments(monkeypatch: pytest.MonkeyPatch) -> Non
                     chat_id="private:1",
                     content="caption",
                     media=[
-                        "file:///tmp/a.png",
-                        "file:///tmp/b.mp4",
-                        "file:///tmp/c.mp3",
-                        "file:///tmp/d.zip",
+                        "/napcat/a.png",
+                        "/napcat/b.mp4",
+                        "/napcat/c.mp3",
+                        "/napcat/d.zip",
                     ],
+                    metadata={"source": "resolved"},
                 )
             )
             action = _find_action(server, "send_private_msg")
             assert action["params"]["message"] == [
-                {"type": "image", "data": {"file": "file:///tmp/a.png"}},
-                {"type": "video", "data": {"file": "file:///tmp/b.mp4"}},
-                {"type": "record", "data": {"file": "file:///tmp/c.mp3"}},
-                {"type": "file", "data": {"file": "file:///tmp/d.zip"}},
+                {"type": "image", "data": {"file": "/napcat/a.png"}},
+                {"type": "video", "data": {"file": "/napcat/b.mp4"}},
+                {"type": "record", "data": {"file": "/napcat/c.mp3"}},
+                {"type": "file", "data": {"file": "/napcat/d.zip"}},
+                {"type": "text", "data": {"text": "caption"}},
+            ]
+            assert not _find_actions(server, "upload_file_stream")
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_uploads_local_media_then_sends_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Local outbound media should stream-upload before send_private_msg."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    media_path = tmp_path / "sample.png"
+    media_bytes = b"a" * (70 * 1024)
+    media_path.write_bytes(media_bytes)
+    expected_sha256 = hashlib.sha256(media_bytes).hexdigest()
+    expected_chunk_count = 2
+    uploaded_path = "/napcat/cache/sample.png"
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> bool:
+        del server
+        if payload.get("action") == "upload_file_stream":
+            params = payload["params"]
+            if params.get("is_complete"):
+                await ws.send_json(
+                    {
+                        "status": "ok",
+                        "retcode": 0,
+                        "data": {
+                            "status": "file_complete",
+                            "file_path": uploaded_path,
+                            "file_size": len(media_bytes),
+                            "sha256": expected_sha256,
+                        },
+                        "echo": payload["echo"],
+                    }
+                )
+                return True
+            chunk_index = params["chunk_index"]
+            chunk_size = 64 * 1024
+            start = chunk_index * chunk_size
+            end = start + chunk_size
+            assert params["stream_id"]
+            assert params["total_chunks"] == expected_chunk_count
+            assert params["file_size"] == len(media_bytes)
+            assert params["expected_sha256"] == expected_sha256
+            assert params["filename"] == "sample.png"
+            assert params["file_retention"] == 30 * 1000
+            assert base64.b64decode(params["chunk_data"]) == media_bytes[start:end]
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {
+                        "status": "chunk_received",
+                        "received_chunks": chunk_index + 1,
+                        "total_chunks": expected_chunk_count,
+                    },
+                    "echo": payload["echo"],
+                }
+            )
+            return True
+        await _reply_to_send_action(payload, ws)
+        return payload.get("action") in {"send_private_msg", "send_group_msg"}
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await channel.send(
+                OutboundMessage(
+                    channel="anon",
+                    chat_id="private:1",
+                    content="caption",
+                    media=[str(media_path)],
+                    metadata={"source": "upload"},
+                )
+            )
+            upload_actions = _find_actions(server, "upload_file_stream")
+            assert len(upload_actions) == expected_chunk_count + 1
+            assert upload_actions[-1]["params"] == {
+                "stream_id": upload_actions[0]["params"]["stream_id"],
+                "is_complete": True,
+            }
+            action = _find_action(server, "send_private_msg")
+            assert action["params"]["message"] == [
+                {"type": "image", "data": {"file": uploaded_path}},
                 {"type": "text", "data": {"text": "caption"}},
             ]
         finally:
@@ -4115,26 +4217,131 @@ def test_send_routes_file_media_segments(monkeypatch: pytest.MonkeyPatch) -> Non
     asyncio.run(case())
 
 
-def test_send_rejects_non_file_media_refs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only file:// media refs should be accepted."""
+def test_send_keeps_uploaded_media_in_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Buffered outbound media should store the resolved uploaded path."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
 
+    media_path = tmp_path / "buffer.png"
+    media_path.write_bytes(b"buffer-me")
+    uploaded_path = "/napcat/cache/buffer.png"
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> bool:
+        del server
+        if payload.get("action") == "upload_file_stream":
+            params = payload["params"]
+            if params.get("is_complete"):
+                await ws.send_json(
+                    {
+                        "status": "ok",
+                        "retcode": 0,
+                        "data": {
+                            "status": "file_complete",
+                            "file_path": uploaded_path,
+                        },
+                        "echo": payload["echo"],
+                    }
+                )
+                return True
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {"status": "chunk_received"},
+                    "echo": payload["echo"],
+                }
+            )
+            return True
+        await _reply_to_send_action(payload, ws, message_id=9123)
+        return payload.get("action") in {"send_private_msg", "send_group_msg"}
+
     async def case() -> None:
-        server = OneBotWebSocketServer()
+        server = OneBotWebSocketServer(on_action=on_action)
         await server.start()
         channel = AnonChannel({"ws_url": server.url}, MessageBus())
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
-            with pytest.raises(ValueError, match="file://"):
+            await channel.send(
+                OutboundMessage(
+                    channel="anon",
+                    chat_id="private:1",
+                    content="caption",
+                    media=[str(media_path)],
+                    metadata={"source": "buffer"},
+                )
+            )
+            buffered = channel._buffer.get_chat_entries("private:1")
+            assert buffered
+            assert buffered[-1].media == [str(media_path)]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_send_raises_when_upload_completion_missing_file_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Missing file_path in upload completion should fail before send_private_msg."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    media_path = tmp_path / "sample.png"
+    media_path.write_bytes(b"upload-me")
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> bool:
+        del server
+        if payload.get("action") != "upload_file_stream":
+            return False
+        params = payload["params"]
+        if params.get("is_complete"):
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {"status": "file_complete"},
+                    "echo": payload["echo"],
+                }
+            )
+            return True
+        await ws.send_json(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": {"status": "chunk_received"},
+                "echo": payload["echo"],
+            }
+        )
+        return True
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        channel = AnonChannel({"ws_url": server.url}, MessageBus())
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            with pytest.raises(RuntimeError, match="missing file_path"):
                 await channel.send(
                     OutboundMessage(
                         channel="anon",
                         chat_id="private:1",
-                        content="hello",
-                        media=["https://example.com/a.png"],
+                        content="caption",
+                        media=[str(media_path)],
                     )
                 )
+            assert not _find_actions(server, "send_private_msg")
         finally:
             await _stop_channel(channel, task, server)
 

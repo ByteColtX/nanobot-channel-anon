@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
+from uuid import uuid4
 
 import aiohttp
 from loguru import logger
@@ -48,6 +51,8 @@ _SESSION_QUEUE_MAX_SIZE = 64
 _GROUP_MUTE_WARMUP_CONCURRENCY = 8
 _MEDIA_DOWNLOAD_TIMEOUT_S = 30.0
 _FFMPEG_TIMEOUT_S = 30.0
+_OUTBOUND_UPLOAD_CHUNK_SIZE = 64 * 1024
+_OUTBOUND_UPLOAD_FILE_RETENTION_MS = 30 * 1000
 _INBOUND_CACHE_PATH = Path(".anon_inbound_buffer.json")
 _SUPPORTED_TRANSCRIPTION_SUFFIXES = {
     ".flac",
@@ -180,10 +185,11 @@ class AnonChannel(BaseChannel):
                 reason,
             )
             return
+        resolved_media = await self._resolve_outbound_media_refs(msg.media)
         action, params = build_send_request(
             msg.chat_id,
             msg.content,
-            media=msg.media,
+            media=resolved_media,
             metadata=msg.metadata,
         )
         response = await self._send_api_request(action, params)
@@ -211,6 +217,108 @@ class AnonChannel(BaseChannel):
                 metadata=outbound_metadata,
             )
         )
+
+    async def _resolve_outbound_media_refs(self, media: list[str]) -> list[str]:
+        return [
+            await self._resolve_single_outbound_media_ref(item)
+            for item in media
+        ]
+
+    async def _resolve_single_outbound_media_ref(self, media_ref: str) -> str:
+        normalized_media_ref = media_ref.strip()
+        if not normalized_media_ref:
+            raise ValueError("media ref is required")
+        if normalized_media_ref.startswith("file://"):
+            path = self._path_from_media_ref(normalized_media_ref)
+            if path.exists():
+                return await self._upload_outbound_file_via_stream(path)
+            return normalized_media_ref
+        local_path = Path(normalized_media_ref)
+        if local_path.is_absolute() and local_path.exists():
+            return await self._upload_outbound_file_via_stream(local_path)
+        return normalized_media_ref
+
+    async def _upload_outbound_file_via_stream(self, path: Path) -> str:
+        resolved_path = path.resolve(strict=True)
+        file_size = resolved_path.stat().st_size
+        max_size = self.config.media_max_size_mb * 1024 * 1024
+        if file_size > max_size:
+            raise ValueError(
+                f"outbound media exceeds size limit: {resolved_path.name}"
+            )
+        body = resolved_path.read_bytes()
+        sha256 = hashlib.sha256(body).hexdigest()
+        total_chunks = max(
+            1,
+            (len(body) + _OUTBOUND_UPLOAD_CHUNK_SIZE - 1)
+            // _OUTBOUND_UPLOAD_CHUNK_SIZE,
+        )
+        stream_id = str(uuid4())
+        for chunk_index in range(total_chunks):
+            start = chunk_index * _OUTBOUND_UPLOAD_CHUNK_SIZE
+            end = start + _OUTBOUND_UPLOAD_CHUNK_SIZE
+            chunk = body[start:end]
+            response = await self._send_api_request(
+                "upload_file_stream",
+                {
+                    "stream_id": stream_id,
+                    "chunk_data": base64.b64encode(chunk).decode("ascii"),
+                    "chunk_index": chunk_index,
+                    "total_chunks": total_chunks,
+                    "file_size": file_size,
+                    "expected_sha256": sha256,
+                    "filename": resolved_path.name,
+                    "file_retention": _OUTBOUND_UPLOAD_FILE_RETENTION_MS,
+                },
+            )
+            self._ensure_outbound_upload_chunk_ok(response, filename=resolved_path.name)
+        completion = await self._send_api_request(
+            "upload_file_stream",
+            {"stream_id": stream_id, "is_complete": True},
+        )
+        return self._extract_uploaded_file_path(completion, filename=resolved_path.name)
+
+    @staticmethod
+    def _ensure_outbound_upload_chunk_ok(
+        response: OneBotRawEvent,
+        *,
+        filename: str,
+    ) -> None:
+        if response.status == "failed":
+            raise RuntimeError(f"upload_file_stream failed for {filename}")
+
+    @staticmethod
+    def _extract_uploaded_file_path(
+        response: OneBotRawEvent,
+        *,
+        filename: str,
+    ) -> str:
+        data = response.data
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"upload_file_stream completion missing data for {filename}"
+            )
+        status = str(data.get("status") or "").strip()
+        if status != "file_complete":
+            raise RuntimeError(
+                f"upload_file_stream completion missing file_complete for {filename}"
+            )
+        file_path = str(data.get("file_path") or "").strip()
+        if not file_path:
+            raise RuntimeError(
+                f"upload_file_stream completion missing file_path for {filename}"
+            )
+        return file_path
+
+    @staticmethod
+    def _path_from_media_ref(media_ref: str) -> Path:
+        parsed = urlparse(media_ref)
+        if parsed.scheme != "file":
+            raise ValueError("media refs must use file:// URIs")
+        path = unquote(parsed.path).strip()
+        if not path:
+            raise ValueError("file:// media ref must include a path")
+        return Path(path)
 
     async def _connect_ws(self) -> aiohttp.ClientWebSocketResponse:
         session = self._require_session()
