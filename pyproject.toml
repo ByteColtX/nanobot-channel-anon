@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "适用于 nanobot 的 Tencent QQ 聊天插件（napcat）"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["nanobot-ai", "aiohttp"]
+dependencies = [
+    "nanobot-ai>=0.1.5",
+    "aiohttp",
+    "mcp",
+]
 
 [dependency-groups]
 dev = ["ruff", "pytest", "pyright"]

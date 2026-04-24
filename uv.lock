@@ -1334,7 +1334,7 @@ wheels = [
 
 [[package]]
 name = "nanobot-ai"
-version = "0.1.5.post1"
+version = "0.1.5.post2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -1361,8 +1361,9 @@ dependencies = [
     { name = "python-docx" },
     { name = "python-pptx" },
     { name = "python-socketio" },
-    { name = "python-socks" },
+    { name = "python-socks", marker = "sys_platform != 'win32'" },
     { name = "python-telegram-bot", extra = ["socks"] },
+    { name = "pyyaml" },
     { name = "qq-botpy" },
     { name = "questionary" },
     { name = "readability-lxml" },
@@ -1375,9 +1376,9 @@ dependencies = [
     { name = "websocket-client" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8d/e1/e2e481b2df357c7b44bb2476b764ecb468ad0949ae7eb5cd3b4d0ecc015c/nanobot_ai-0.1.5.post1.tar.gz", hash = "sha256:287c17d240c02bd749167304a084076216faf5c303f628d3030d88ca77075285", size = 347168, upload-time = "2026-04-14T19:06:45.908Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bd/2e/247922784187ab2bbbd0ba493f68d3ae5ac90e649e0c3fc304e29bd69e38/nanobot_ai-0.1.5.post2.tar.gz", hash = "sha256:558b7e49130dcf95646009ac807eaa5f196489a95bbf72655a82402908923e1a", size = 346018, upload-time = "2026-04-21T17:43:42.017Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/86/53/f6cd18609b9309a6282849200eb0a90f28fa880509e2a3c463f5fde0e3c8/nanobot_ai-0.1.5.post1-py3-none-any.whl", hash = "sha256:3686358e71449ed124b82a64b27d4f80b1bc0ac3f7f1fba5711ea5527fe7a9e9", size = 381625, upload-time = "2026-04-14T19:06:43.682Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/16/19367cc0866d7b87962d6cec0dd52fdaeb909770a4837f05f89ae383b368/nanobot_ai-0.1.5.post2-py3-none-any.whl", hash = "sha256:8d14b0c4029fbed18e8a18af5228819ab17ed0a5bb0d5864ca2185589853ff05", size = 402261, upload-time = "2026-04-21T17:43:40.19Z" },
 ]
 
 [[package]]
@@ -1386,6 +1387,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
+    { name = "mcp" },
     { name = "nanobot-ai" },
 ]
 
@@ -1399,7 +1401,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp" },
-    { name = "nanobot-ai" },
+    { name = "mcp" },
+    { name = "nanobot-ai", specifier = ">=0.1.5" },
 ]
 
 [package.metadata.requires-dev]

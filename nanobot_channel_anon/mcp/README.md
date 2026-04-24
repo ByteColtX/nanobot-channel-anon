@@ -1,0 +1,54 @@
+# MCP
+
+这个目录放 nanobot-channel-anon 的 MCP 运行时代码。
+
+目前主要用途：
+
+- 启动一个基于 `FastMCP` 的 stdio server
+- 通过 NapCat HTTP 调用 QQ 管理类接口
+- 给 nanobot 暴露可调用的 MCP tools
+
+当前已实现的工具：
+
+- `qq_delete_msg`
+- `qq_send_poke`
+- `qq_send_like`
+- `qq_set_group_add_request`
+- `qq_set_friend_add_request`
+
+大致结构：
+
+- `server.py`：MCP 服务入口
+- `settings.py`：环境变量配置读取
+- `napcat_client.py`：NapCat HTTP 调用封装
+- `models.py`：共享请求/响应模型
+- `tools/`：按接口拆分的 MCP tool 实现
+
+运行时配置通过环境变量传入，不在代码里硬编码 NapCat 地址或 token。
+
+配置示例：
+
+```json
+{
+  "tools": {
+    "mcpServers": {
+      "napcat-qq-actions": {
+        "type": "stdio",
+        "command": "python",
+        "args": ["-m", "nanobot_channel_anon.mcp.server"],
+        "env": {
+          "NAPCAT_HTTP_URL": "http://127.0.0.1:3000",
+          "NAPCAT_HTTP_ACCESS_TOKEN": "your-token"
+        },
+        "enabledTools": [
+          "qq_delete_msg",
+          "qq_send_poke",
+          "qq_send_like",
+          "qq_set_group_add_request",
+          "qq_set_friend_add_request"
+        ]
+      }
+    }
+  }
+}
+```
