@@ -70,10 +70,10 @@ class AnonConfig(Base):
         ge=0,
         description="Minimum interval between poke-triggered sessions, in seconds.",
     )
-    max_text_length: int = Field(
-        default=200,
+    max_ctx_length: int = Field(
+        default=300,
         gt=0,
-        description="Maximum length kept from a single incoming text message.",
+        description="Maximum length kept from a single CTX message body.",
     )
     max_context_messages: int = Field(
         default=25,

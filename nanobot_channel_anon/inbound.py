@@ -12,7 +12,6 @@ from nanobot_channel_anon.buffer import (
     ForwardNodeEntry,
     MessageEntry,
 )
-from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.onebot import OneBotMessageSegment, OneBotRawEvent
 from nanobot_channel_anon.utils import (
     build_group_chat_id,
@@ -83,7 +82,6 @@ class InboundCandidate:
 def normalize_inbound_event(
     raw: OneBotRawEvent,
     *,
-    config: AnonConfig,
     self_id: str | None,
 ) -> InboundCandidate | None:
     """把 OneBot 原始事件转换为可供路由判定的候选事件."""
@@ -91,7 +89,6 @@ def normalize_inbound_event(
     if raw.post_type == "message":
         return _normalize_message_event(
             raw,
-            max_text_length=config.max_text_length,
             self_id=effective_self_id,
         )
     if raw.post_type == "notice":
@@ -102,7 +99,6 @@ def normalize_inbound_event(
 def _normalize_message_event(
     raw: OneBotRawEvent,
     *,
-    max_text_length: int,
     self_id: str | None,
 ) -> InboundCandidate | None:
     message_type = raw.message_type
@@ -128,7 +124,6 @@ def _normalize_message_event(
     if not parsed.text and _has_only_ignored_media_segments(segments):
         return None
     content = parsed.text or raw.raw_message.strip()
-    content = content[:max_text_length].strip()
 
     metadata = {
         "event_kind": event_kind,
@@ -764,7 +759,14 @@ def _parse_segments(
             elif target_id is not None:
                 if self_id is not None and target_id == self_id:
                     mentioned_self = True
-                render_segments.append({"type": "mention", "user_id": target_id})
+                mention_segment = {"type": "mention", "user_id": target_id}
+                card = string_value(data.get("card"))
+                nickname = string_value(data.get("nickname"))
+                if card is not None:
+                    mention_segment["card"] = card
+                if nickname is not None:
+                    mention_segment["nickname"] = nickname
+                render_segments.append(mention_segment)
             continue
 
         if segment.type == "reply":

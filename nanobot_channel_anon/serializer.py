@@ -16,6 +16,8 @@ from nanobot_channel_anon.buffer import (
 )
 from nanobot_channel_anon.utils import parse_chat_id, string_value
 
+_CTX_TRUNCATION_MARKER = "[...TRUNCATED...]"
+
 
 @dataclass(slots=True)
 class SerializedCQMessage:
@@ -62,6 +64,7 @@ class _CTXBuilder:
         message_ids: list[str] | None = None,
         media: list[str] | None = None,
         count: int | None = None,
+        max_ctx_length: int | None = None,
     ) -> None:
         self.chat_id = chat_id
         self.entries = entries
@@ -91,6 +94,7 @@ class _CTXBuilder:
         self._private_index = 0
         self._group_index = 0
         self._forward_index = 0
+        self._max_ctx_length = max_ctx_length
 
     def build(self) -> SerializedCQMessage:
         bot_uid = self._ensure_bot_user()
@@ -105,6 +109,7 @@ class _CTXBuilder:
             rendered_message_count += 1
             sender_uid = self._resolve_message_sender_uid(entry)
             body, forward_lines = self._render_message_body(entry)
+            body = self._truncate_message_body(body)
             body_lines.append(
                 "|".join(
                     ("M", self._escape(entry.message_id), sender_uid, self._escape(body))
@@ -178,8 +183,11 @@ class _CTXBuilder:
         )
 
     def _render_poke(self, entry: MessageEntry) -> str:
+        return self._render_notice_event(entry)
+
+    def _render_notice_event(self, entry: MessageEntry) -> str:
         sender_uid = self._resolve_message_sender_uid(entry)
-        return "|".join(("P", self._escape(entry.message_id), sender_uid))
+        return "|".join(("E", self._escape(entry.message_id), sender_uid))
 
     def _render_message_body(self, entry: MessageEntry) -> tuple[str, list[str]]:
         body, forward_lines = self._render_body_parts(
@@ -219,6 +227,8 @@ class _CTXBuilder:
                 mention_uid = self._ensure_user(
                     segment.get("user_id"),
                     segment.get("user_id") or "",
+                    sender_nickname=segment.get("nickname") or "",
+                    sender_card=segment.get("card") or "",
                     is_bot=segment.get("user_id") == self.self_id,
                 )
                 body_parts.append(f"@{mention_uid}")
@@ -527,6 +537,18 @@ class _CTXBuilder:
     def _escape(value: str) -> str:
         return value.replace("\\", "\\\\").replace("|", "\\|").replace("\n", "\\n")
 
+    def _truncate_message_body(self, body: str) -> str:
+        max_ctx_length = self._max_ctx_length
+        if max_ctx_length is None or len(body) <= max_ctx_length:
+            return body
+        marker = _CTX_TRUNCATION_MARKER
+        keep = max_ctx_length - len(marker)
+        if keep <= 0:
+            return marker[:max_ctx_length]
+        head_keep = keep // 2
+        tail_keep = keep - head_keep
+        return f"{body[:head_keep]}{marker}{body[-tail_keep:]}"
+
 
 def serialize_chat_entries(
     chat_id: str,
@@ -534,6 +556,7 @@ def serialize_chat_entries(
     *,
     self_id: str | None,
     self_nickname: str | None = None,
+    max_ctx_length: int | None = None,
 ) -> SerializedCQMessage | None:
     """Serialize buffered chat entries into one CTX block."""
     if not entries:
@@ -543,6 +566,7 @@ def serialize_chat_entries(
         entries=entries,
         self_id=self_id,
         self_nickname=self_nickname,
+        max_ctx_length=max_ctx_length,
     ).build()
 
 
@@ -553,6 +577,7 @@ def serialize_buffer_chat(
     self_id: str | None,
     self_nickname: str | None = None,
     extra_reply_targets: list[MessageEntry] | None = None,
+    max_ctx_length: int | None = None,
 ) -> SerializedCQMessage | None:
     """Serialize unread buffered chat entries into one CTX block."""
     llm_entries = buffer.get_unconsumed_llm_chat_entries(chat_id)
@@ -588,4 +613,5 @@ def serialize_buffer_chat(
         message_ids=[entry.message_id for entry in llm_entries],
         media=_CTXBuilder._collect_media(llm_entries),
         count=unread_message_count,
+        max_ctx_length=max_ctx_length,
     ).build()

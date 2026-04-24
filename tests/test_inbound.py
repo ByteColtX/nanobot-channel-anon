@@ -5,7 +5,6 @@ import asyncio
 import pytest
 
 from nanobot_channel_anon.buffer import Buffer, MessageEntry
-from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.inbound import (
     cache_inbound_candidate,
     normalize_inbound_event,
@@ -45,7 +44,6 @@ def test_normalize_private_message_segments() -> None:
 
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
 
@@ -84,7 +82,6 @@ def test_normalize_group_message_extracts_mentions_and_reply() -> None:
 
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
 
@@ -99,27 +96,6 @@ def test_normalize_group_message_extracts_mentions_and_reply() -> None:
         {"type": "mention", "user_id": "42"},
         {"type": "text", "text": "hi there"},
     ]
-
-
-def test_normalize_message_truncates_content() -> None:
-    """Normalized text should honor max_text_length."""
-    raw = OneBotRawEvent.model_validate(
-        {
-            "post_type": "message",
-            "message_type": "private",
-            "user_id": "123",
-            "raw_message": "abcdef",
-        }
-    )
-
-    candidate = normalize_inbound_event(
-        raw,
-        config=AnonConfig(max_text_length=3),
-        self_id="42",
-    )
-
-    assert candidate is not None
-    assert candidate.content == "abc"
 
 
 def test_normalize_notice_poke() -> None:
@@ -138,7 +114,6 @@ def test_normalize_notice_poke() -> None:
 
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
 
@@ -206,7 +181,6 @@ def test_normalize_forward_segment_collects_forward_refs() -> None:
 
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
 
@@ -234,7 +208,6 @@ def test_process_inbound_candidate_marks_reply_to_self_and_expands_forward() -> 
     )
     reply_candidate = normalize_inbound_event(
         reply_raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
     assert reply_candidate is not None
@@ -298,7 +271,6 @@ def test_process_inbound_candidate_downloads_images() -> None:
     )
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
     assert candidate is not None
@@ -375,7 +347,6 @@ def test_normalize_message_ignores_video_and_file_segments() -> None:
 
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
 
@@ -417,7 +388,6 @@ def test_normalize_message_drops_pure_video_and_file_segments() -> None:
 
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
 
@@ -447,7 +417,6 @@ def test_process_inbound_candidate_transcribes_voice() -> None:
     )
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
     assert candidate is not None
@@ -521,7 +490,6 @@ def test_process_inbound_candidate_keeps_voice_placeholder_when_transcription_fa
     )
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
     assert candidate is not None
@@ -589,7 +557,6 @@ def test_process_inbound_candidate_replaces_multiple_voice_placeholders_in_order
     )
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
     assert candidate is not None
@@ -635,7 +602,6 @@ def test_process_inbound_candidate_expands_forward_and_cache_writes_message() ->
     )
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
     assert candidate is not None
@@ -707,7 +673,6 @@ def test_process_inbound_candidate_keeps_forward_node_message_id() -> None:
     )
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
     assert candidate is not None
@@ -756,7 +721,6 @@ def test_process_inbound_candidate_leaves_forward_source_unknown() -> None:
     )
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
     assert candidate is not None
@@ -803,7 +767,6 @@ def test_process_inbound_candidate_ignores_forward_node_raw_cq_for_video_file() 
     )
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
     assert candidate is not None
@@ -869,7 +832,6 @@ def test_process_inbound_candidate_enhances_forward_node_media() -> None:
     )
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
     assert candidate is not None
@@ -978,7 +940,6 @@ def test_normalize_unsupported_event_returns_none() -> None:
 
     candidate = normalize_inbound_event(
         raw,
-        config=AnonConfig(max_text_length=200),
         self_id="42",
     )
 

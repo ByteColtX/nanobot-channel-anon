@@ -565,8 +565,72 @@ def test_serialize_chat_entries_renders_mentions_and_poke_rows() -> None:
 
     assert serialized is not None
     assert "<CTX/1 g:456 bot:u0 n:1>" in serialized.text
-    assert "P|notice:poke:1:456:123:42|u1" in serialized.text
+    assert "E|notice:poke:1:456:123:42|u1" in serialized.text
     assert "M|2|u1|@u0 hi @all" in serialized.text
+
+
+def test_serialize_group_mentions_prefers_card_then_nickname_then_qq() -> None:
+    """Group mention users should preserve card-over-nickname-over-QQ priority."""
+    serialized = serialize_chat_entries(
+        "group:456",
+        [
+            MessageEntry(
+                message_id="1",
+                chat_id="group:456",
+                sender_id="123",
+                sender_name="Alice",
+                is_from_self=False,
+                content="mentions",
+                render_segments=[
+                    {"type": "mention", "user_id": "2001", "card": "CardName"},
+                    {"type": "text", "text": " "},
+                    {"type": "mention", "user_id": "2002", "nickname": "NickName"},
+                    {"type": "text", "text": " "},
+                    {"type": "mention", "user_id": "2003"},
+                ],
+            ),
+        ],
+        self_id="42",
+    )
+
+    assert serialized is not None
+    assert "U|u2|2001|CardName" in serialized.text
+    assert "U|u3|2002|NickName" in serialized.text
+    assert "U|u4|2003|2003" in serialized.text
+    assert "M|1|u1|@u2 @u3 @u4" in serialized.text
+
+
+def test_serialize_chat_entries_truncates_each_message_body(
+) -> None:
+    """Overlong M row bodies should keep both ends and mark the omitted middle."""
+    long_text = "前" * 200 + "后" * 200
+    serialized = serialize_chat_entries(
+        "private:123",
+        [
+            MessageEntry(
+                message_id="9009999",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content=long_text,
+                render_segments=[{"type": "text", "text": long_text}],
+            )
+        ],
+        self_id="42",
+        max_ctx_length=300,
+    )
+
+    assert serialized is not None
+    assert "<CTX/1 p:123 bot:me n:1>" in serialized.text
+    assert "M|9009999|peer|" in serialized.text
+    assert "E|__omitted__|" not in serialized.text
+    assert (
+        "M|9009999|peer|"
+        + ("前" * 141)
+        + "[...TRUNCATED...]"
+        + ("后" * 142)
+    ) in serialized.text
 
 
 def test_context_builder_attaches_all_unread_window_images(

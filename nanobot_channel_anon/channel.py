@@ -478,6 +478,106 @@ class AnonChannel(BaseChannel):
             self._self_nickname,
         )
 
+    async def _hydrate_group_mentions(self, payload: OneBotRawEvent) -> OneBotRawEvent:
+        if payload.post_type != "message" or payload.message_type != "group":
+            return payload
+
+        group_id = normalize_onebot_id(payload.group_id)
+        if group_id is None:
+            return payload
+
+        raw_message = payload.message
+        if not isinstance(raw_message, list):
+            return payload
+
+        hydrated = False
+        normalized_segments: list[dict[str, Any]] = []
+        for segment in raw_message:
+            if isinstance(segment, dict):
+                segment_dict = dict(segment)
+            else:
+                segment_dict = segment.model_dump(exclude_none=True)
+            if await self._hydrate_group_mention_segment(segment_dict, group_id):
+                hydrated = True
+            normalized_segments.append(segment_dict)
+
+        if not hydrated:
+            return payload
+
+        payload_data = payload.model_dump(exclude_none=False)
+        payload_data["message"] = normalized_segments
+        return OneBotRawEvent.model_validate(payload_data)
+
+    async def _hydrate_group_mention_segment(
+        self,
+        segment: dict[str, Any],
+        group_id: str,
+    ) -> bool:
+        if str(segment.get("type") or "") != "at":
+            return False
+
+        raw_data = segment.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
+        target_id = normalize_onebot_id(data.get("qq") or data.get("user_id"))
+        if target_id is None or target_id == "all":
+            return False
+        if data.get("card") or data.get("nickname"):
+            return False
+
+        member = await self._fetch_group_member_info(group_id, target_id)
+        if member is None:
+            return False
+
+        card = str(member.get("card") or "")
+        nickname = str(member.get("nickname") or "")
+        if not card and not nickname:
+            return False
+
+        segment["data"] = {**data, "card": card, "nickname": nickname}
+        return True
+
+    async def _fetch_group_member_info(
+        self,
+        group_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        try:
+            response = await self._send_api_request(
+                "get_group_member_info",
+                {"group_id": group_id, "user_id": user_id},
+            )
+        except Exception as exc:
+            logger.warning(
+                "Anon get_group_member_info failed for group {} user {}: {}",
+                group_id,
+                user_id,
+                exc,
+            )
+            return None
+
+        if response.status == "failed" or str(response.retcode or "") not in {"", "0"}:
+            logger.warning(
+                (
+                    "Anon get_group_member_info returned failure for group {} user {}: "
+                    "status={} retcode={}"
+                ),
+                group_id,
+                user_id,
+                response.status,
+                response.retcode,
+            )
+            return None
+
+        payload = response.data if isinstance(response.data, dict) else None
+        if payload is None:
+            logger.warning(
+                "Anon get_group_member_info returned invalid data for group {} user {}",
+                group_id,
+                user_id,
+            )
+            return None
+        return payload
+
     @staticmethod
     def _extract_slash_command(candidate: Any) -> str | None:
         """Extract a normalized slash command name from inbound content."""
@@ -797,9 +897,9 @@ class AnonChannel(BaseChannel):
         if self._handle_group_ban_notice(payload):
             return
 
+        payload = await self._hydrate_group_mentions(payload)
         candidate = normalize_inbound_event(
             payload,
-            config=self.config,
             self_id=self._self_id,
         )
         if candidate is None:
@@ -904,6 +1004,7 @@ class AnonChannel(BaseChannel):
             self_id=self._self_id,
             self_nickname=self._self_nickname,
             extra_reply_targets=reply_targets,
+            max_ctx_length=self.config.max_ctx_length,
         )
         metadata = dict(routed.metadata)
 
@@ -1282,7 +1383,6 @@ class AnonChannel(BaseChannel):
                     "time": payload.get("time"),
                 }
             ),
-            config=self.config,
             self_id=self._self_id,
         )
         if candidate is None:

@@ -2870,7 +2870,7 @@ def test_routed_poke_serializes_into_ctx(
             assert inbound.chat_id == "private:123"
             assert inbound.sender_id == "123"
             assert "<CTX/1 p:123 bot:me n:0>" in inbound.content
-            assert "P|notice:poke:1776818315:private:123:42|peer" in inbound.content
+            assert "E|notice:poke:1776818315:private:123:42|peer" in inbound.content
             assert inbound.metadata["trigger_reason"] == "poke"
             assert inbound.metadata["ctx_message_ids"] == [
                 "notice:poke:1776818315:private:123:42"
@@ -2928,7 +2928,7 @@ def test_group_poke_accepts_matching_group_id(
             ]
             assert inbound.metadata["ctx_count"] == 0
             assert "<CTX/1 g:456 bot:u0 n:0>" in inbound.content
-            assert "P|notice:poke:1776818315:456:123:42|u1" in inbound.content
+            assert "E|notice:poke:1776818315:456:123:42|u1" in inbound.content
         finally:
             await _stop_channel(channel, task, server)
 
@@ -3039,8 +3039,31 @@ def test_group_inbound_attaches_history_only_image_from_unread_window(
         lambda _channel: tmp_path / "media",
     )
 
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") != "get_group_member_info":
+            return
+        await ws.send_json(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "group_id": 456,
+                    "user_id": 42,
+                    "nickname": "anon-bot",
+                    "card": "",
+                    "role": "member",
+                },
+                "echo": payload["echo"],
+            }
+        )
+
     async def case() -> None:
-        server = OneBotWebSocketServer()
+        server = OneBotWebSocketServer(on_action=on_action)
         await server.start()
         bus = MessageBus()
         channel = AnonChannel(
@@ -3129,8 +3152,31 @@ def test_group_inbound_attaches_history_and_trigger_images_from_unread_window(
         lambda _channel: tmp_path / "media",
     )
 
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") != "get_group_member_info":
+            return
+        await ws.send_json(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "group_id": 456,
+                    "user_id": 42,
+                    "nickname": "anon-bot",
+                    "card": "",
+                    "role": "member",
+                },
+                "echo": payload["echo"],
+            }
+        )
+
     async def case() -> None:
-        server = OneBotWebSocketServer()
+        server = OneBotWebSocketServer(on_action=on_action)
         await server.start()
         bus = MessageBus()
         channel = AnonChannel(
@@ -3215,6 +3261,81 @@ def test_group_inbound_attaches_history_and_trigger_images_from_unread_window(
     monkeypatch.setattr(aiohttp.ClientSession, "get", fake_get)
     asyncio.run(case())
 
+
+
+def test_group_at_uses_group_member_info_when_segment_lacks_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Group mentions should fallback to get_group_member_info for card/nickname."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") != "get_group_member_info":
+            return
+        await ws.send_json(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "group_id": 456,
+                    "user_id": 999,
+                    "nickname": "MentionNick",
+                    "card": "MentionCard",
+                    "role": "member",
+                },
+                "echo": payload["echo"],
+            }
+        )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "group_trigger_prob": 0.0,
+                "trigger_on_at": True,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9501",
+                    "group_id": "456",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "at", "data": {"qq": "42"}},
+                        {"type": "text", "data": {"text": "帮我叫一下"}},
+                        {"type": "at", "data": {"qq": "999"}},
+                    ],
+                }
+            )
+            inbound = await _consume_inbound(bus)
+            assert "U|u2|999|MentionCard" in inbound.content
+            assert "M|9501|u1|@u0帮我叫一下@u2" in inbound.content
+            actions = _find_actions(server, "get_group_member_info")
+            assert [item["params"] for item in actions] == [
+                {"group_id": "456", "user_id": "42"},
+                {"group_id": "456", "user_id": "999"},
+            ]
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
 
 
 def test_disallowed_private_image_inbound_skips_download(
