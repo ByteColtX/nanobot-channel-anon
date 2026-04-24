@@ -46,9 +46,6 @@ class ControlledAnonChannel(AnonChannel):
             token: asyncio.Event() for token in self._image_gates
         }
 
-    def _write_inbound_cache_file(self) -> None:
-        """Skip filesystem writes in tests."""
-
     async def _resolve_forward_content(self, forward_id: str) -> Any:
         return {"forward_id": forward_id, "messages": []}
 

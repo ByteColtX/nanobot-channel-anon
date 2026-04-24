@@ -492,7 +492,6 @@ def test_fetch_self_id_supports_wrapped_and_flat_payloads(
 
 def test_reader_writes_private_message_to_cache_file(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """A triggered private message should be written to cache and published."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -509,7 +508,6 @@ def test_reader_writes_private_message_to_cache_file(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._ws is not None)
@@ -522,17 +520,12 @@ def test_reader_writes_private_message_to_cache_file(
                     "raw_message": "hello",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            assert snapshot["private:123"][0]["sender_id"] == "123"
-            assert snapshot["private:123"][0]["content"] == "hello"
-            assert (
-                snapshot["private:123"][0]["metadata"]["trigger_reason"]
-                == "private_prob"
-            )
+            buffered = channel._buffer.get("private:123", "7000")
+            assert buffered is not None
+            assert buffered.sender_id == "123"
+            assert buffered.content == "hello"
+            assert buffered.metadata["trigger_reason"] == "private_prob"
             assert inbound.chat_id == "private:123"
             assert inbound.sender_id == "123"
             assert inbound.content == "\n".join(
@@ -556,7 +549,6 @@ def test_reader_writes_private_message_to_cache_file(
 
 def test_reader_keeps_forward_placeholder(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Forward segments should stay as placeholders in cached content."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -573,7 +565,6 @@ def test_reader_keeps_forward_placeholder(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._ws is not None)
@@ -610,23 +601,12 @@ def test_reader_keeps_forward_placeholder(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            assert snapshot["private:123"][0]["content"] == "看看[forward]"
-            assert (
-                snapshot["private:123"][0]["metadata"]["forward_refs"][0]
-                ["forward_id"]
-                == "fwd-1"
-            )
-            assert (
-                snapshot["private:123"][0]["expanded_forwards"][0]["nodes"][0]
-                ["content"]
-                == "hello"
-            )
             buffered = channel._buffer.get("private:123", "700")
+            assert buffered is not None
+            assert buffered.content == "看看[forward]"
+            assert buffered.forward_refs[0]["forward_id"] == "fwd-1"
+            assert buffered.expanded_forwards[0].nodes[0].content == "hello"
             assert buffered is not None
             assert buffered.expanded_forwards[0].nodes[0].content == "hello"
             assert inbound.metadata["ctx_message_ids"] == ["700"]
@@ -680,7 +660,6 @@ def test_reader_drops_disallowed_sender_before_publish(
 
 def test_reader_fetches_forward_content_by_id(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Forward IDs should be expanded through get_forward_msg before buffering."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -726,7 +705,6 @@ def test_reader_fetches_forward_content_by_id(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._ws is not None)
@@ -742,17 +720,12 @@ def test_reader_fetches_forward_content_by_id(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            assert snapshot["private:123"][0]["content"] == "看看[forward]"
-            assert (
-                snapshot["private:123"][0]["metadata"]["expanded_forwards"][0]
-                ["nodes"][0]["content"]
-                == "forwarded"
-            )
+            buffered = channel._buffer.get("private:123", "701")
+            assert buffered is not None
+            assert buffered.content == "看看[forward]"
+            expanded = buffered.metadata["expanded_forwards"][0]
+            assert expanded["nodes"][0]["content"] == "forwarded"
             assert _find_action(server, "get_forward_msg")["params"] == {"id": "fwd-2"}
             assert inbound.metadata["ctx_message_ids"] == ["701"]
             assert "N|0|u0|forwarded" in inbound.content
@@ -764,7 +737,6 @@ def test_reader_fetches_forward_content_by_id(
 
 def test_reader_marks_get_forward_msg_failure_unresolved(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Failed get_forward_msg responses should be treated as unresolved forwards."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -807,7 +779,6 @@ def test_reader_marks_get_forward_msg_failure_unresolved(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._ws is not None)
@@ -823,12 +794,10 @@ def test_reader_marks_get_forward_msg_failure_unresolved(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            expanded = snapshot["private:123"][0]["metadata"]["expanded_forwards"][0]
+            buffered = channel._buffer.get("private:123", "702")
+            assert buffered is not None
+            expanded = buffered.metadata["expanded_forwards"][0]
             assert expanded["forward_id"] == "fwd-expired"
             assert expanded["unresolved"] is True
             assert expanded["nodes"] == []
@@ -856,7 +825,6 @@ def test_reader_marks_get_forward_msg_failure_unresolved(
 
 def test_reader_marks_get_forward_msg_null_data_unresolved(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Null get_forward_msg data should be treated as unresolved forwards."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -899,7 +867,6 @@ def test_reader_marks_get_forward_msg_null_data_unresolved(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._ws is not None)
@@ -915,12 +882,10 @@ def test_reader_marks_get_forward_msg_null_data_unresolved(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            expanded = snapshot["private:123"][0]["metadata"]["expanded_forwards"][0]
+            buffered = channel._buffer.get("private:123", "703")
+            assert buffered is not None
+            expanded = buffered.metadata["expanded_forwards"][0]
             assert expanded["forward_id"] == "fwd-null"
             assert expanded["unresolved"] is True
             assert expanded["nodes"] == []
@@ -945,7 +910,6 @@ def test_reader_marks_get_forward_msg_null_data_unresolved(
 
 def test_reader_forward_node_ignores_unsupported_video_raw_cq(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Forward nodes with unsupported-only media should not leak raw CQ into CTX."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -999,7 +963,6 @@ def test_reader_forward_node_ignores_unsupported_video_raw_cq(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._ws is not None)
@@ -1015,12 +978,10 @@ def test_reader_forward_node_ignores_unsupported_video_raw_cq(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            expanded = snapshot["private:123"][0]["metadata"]["expanded_forwards"][0]
+            buffered = channel._buffer.get("private:123", "704")
+            assert buffered is not None
+            expanded = buffered.metadata["expanded_forwards"][0]
             assert expanded["nodes"][0]["content"] == ""
             assert "[CQ:video" not in inbound.content
             assert "N|0|u0|" in inbound.content
@@ -1285,7 +1246,6 @@ def test_send_keeps_unsupported_or_invalid_cq_as_text(
 
 def test_send_does_not_reply_to_last_inbound_message(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Inbound message IDs should not create implicit reply segments."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -1310,7 +1270,6 @@ def test_send_does_not_reply_to_last_inbound_message(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -1323,7 +1282,6 @@ def test_send_does_not_reply_to_last_inbound_message(
                     "raw_message": "hello",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.metadata["ctx_message_ids"] == ["777"]
             await channel.send(
@@ -1510,7 +1468,6 @@ def test_send_allows_restart_status_message(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_group_reply_only_triggers_for_bot_message(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Group reply trigger should require replying to a buffered bot message."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -1535,7 +1492,6 @@ def test_group_reply_only_triggers_for_bot_message(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -1555,13 +1511,11 @@ def test_group_reply_only_triggers_for_bot_message(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            assert snapshot["group:2"][0]["metadata"]["trigger_reason"] == "reply"
-            assert snapshot["group:2"][0]["metadata"]["reply_target_from_self"] is True
+            buffered = channel._buffer.get("group:2", "9100")
+            assert buffered is not None
+            assert buffered.metadata["trigger_reason"] == "reply"
+            assert buffered.metadata["reply_target_from_self"] is True
             assert inbound.chat_id == "group:2"
             assert inbound.sender_id == "123"
             assert inbound.metadata["trigger_reason"] == "reply"
@@ -1578,7 +1532,6 @@ def test_group_reply_only_triggers_for_bot_message(
 
 def test_group_reply_backfills_evicted_target_via_get_msg(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Evicted reply targets should be restored through get_msg before CQMSG."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -1628,7 +1581,6 @@ def test_group_reply_backfills_evicted_target_via_get_msg(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -1667,7 +1619,6 @@ def test_group_reply_backfills_evicted_target_via_get_msg(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
 
             assert inbound.metadata["ctx_message_ids"] == ["9100"]
@@ -1740,7 +1691,6 @@ def test_group_reply_to_non_bot_message_does_not_trigger(
 
 def test_allowlisted_group_inbound_accepts_matching_group_id(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Group inbound should pass when allow_from contains the group ID."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -1757,7 +1707,6 @@ def test_allowlisted_group_inbound_accepts_matching_group_id(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -1771,13 +1720,11 @@ def test_allowlisted_group_inbound_accepts_matching_group_id(
                     "raw_message": "hello group",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            assert snapshot["group:2"][0]["sender_id"] == "123"
-            assert snapshot["group:2"][0]["content"] == "hello group"
+            buffered = channel._buffer.get("group:2", "9102")
+            assert buffered is not None
+            assert buffered.sender_id == "123"
+            assert buffered.content == "hello group"
             assert inbound.chat_id == "group:2"
             assert inbound.sender_id == "123"
             assert inbound.metadata["group_id"] == "2"
@@ -1794,7 +1741,6 @@ def test_allowlisted_group_inbound_accepts_matching_group_id(
 
 def test_allowlisted_group_inbound_accepts_matching_sender_id(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Group inbound should pass when allow_from contains the sender ID."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -1811,7 +1757,6 @@ def test_allowlisted_group_inbound_accepts_matching_sender_id(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -1825,13 +1770,11 @@ def test_allowlisted_group_inbound_accepts_matching_sender_id(
                     "raw_message": "hello sender",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            assert snapshot["group:2"][0]["sender_id"] == "123"
-            assert snapshot["group:2"][0]["content"] == "hello sender"
+            buffered = channel._buffer.get("group:2", "9103")
+            assert buffered is not None
+            assert buffered.sender_id == "123"
+            assert buffered.content == "hello sender"
             assert inbound.chat_id == "group:2"
             assert inbound.sender_id == "123"
             assert inbound.metadata["group_id"] == "2"
@@ -1845,7 +1788,6 @@ def test_allowlisted_group_inbound_accepts_matching_sender_id(
 
 def test_group_inbound_rejects_unlisted_sender_and_group(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Group inbound should stop before cache/publish when sender/group are unlisted."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -1862,7 +1804,6 @@ def test_group_inbound_rejects_unlisted_sender_and_group(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -1879,7 +1820,6 @@ def test_group_inbound_rejects_unlisted_sender_and_group(
             with pytest.raises(asyncio.TimeoutError):
                 await _consume_inbound(bus, timeout=0.2)
             assert channel._buffer.get("group:2", "9104") is None
-            assert not channel._inbound_cache_path.exists()
         finally:
             await _stop_channel(channel, task, server)
 
@@ -1888,7 +1828,6 @@ def test_group_inbound_rejects_unlisted_sender_and_group(
 
 def test_cold_start_group_mute_sync_blocks_muted_group_inbound(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Cold-start sync should block group inbound when the bot is muted."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -1931,7 +1870,6 @@ def test_cold_start_group_mute_sync_blocks_muted_group_inbound(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -1949,7 +1887,6 @@ def test_cold_start_group_mute_sync_blocks_muted_group_inbound(
             with pytest.raises(asyncio.TimeoutError):
                 await _consume_inbound(bus, timeout=0.2)
             assert channel._buffer.get("group:2", "mute-1") is None
-            assert not channel._inbound_cache_path.exists()
             assert _find_action(server, "get_group_list")["params"] == {
                 "no_cache": False
             }
@@ -1964,7 +1901,6 @@ def test_cold_start_group_mute_sync_blocks_muted_group_inbound(
 
 def test_group_ban_notice_blocks_and_lift_ban_restores_group_inbound(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Group ban notices should update muted state immediately."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2007,7 +1943,6 @@ def test_group_ban_notice_blocks_and_lift_ban_restores_group_inbound(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2064,7 +1999,6 @@ def test_group_ban_notice_blocks_and_lift_ban_restores_group_inbound(
                     "raw_message": "restored",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "group:2"
             assert inbound.metadata["ctx_message_ids"] == ["mute-3"]
@@ -2077,7 +2011,6 @@ def test_group_ban_notice_blocks_and_lift_ban_restores_group_inbound(
 
 def test_other_user_group_ban_notice_does_not_block_group_inbound(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Group ban notices for other users should not affect the bot state."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2120,7 +2053,6 @@ def test_other_user_group_ban_notice_does_not_block_group_inbound(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2149,7 +2081,6 @@ def test_other_user_group_ban_notice_does_not_block_group_inbound(
                     "raw_message": "allowed",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "group:2"
             assert inbound.metadata["ctx_message_ids"] == ["mute-4"]
@@ -2161,7 +2092,6 @@ def test_other_user_group_ban_notice_does_not_block_group_inbound(
 
 def test_expired_muted_group_entry_is_cleared_before_publish(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Expired muted-group entries should not keep blocking inbound."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2204,7 +2134,6 @@ def test_expired_muted_group_entry_is_cleared_before_publish(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2221,7 +2150,6 @@ def test_expired_muted_group_entry_is_cleared_before_publish(
                     "raw_message": "expired mute",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "group:2"
             assert inbound.metadata["ctx_message_ids"] == ["mute-5"]
@@ -2234,7 +2162,6 @@ def test_expired_muted_group_entry_is_cleared_before_publish(
 
 def test_cold_start_mute_sync_blocks_only_the_target_group(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """A slow mute lookup should block only that group's inbound."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2300,7 +2227,6 @@ def test_cold_start_mute_sync_blocks_only_the_target_group(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2343,7 +2269,6 @@ def test_cold_start_mute_sync_blocks_only_the_target_group(
 
 def test_first_message_in_new_group_triggers_single_lazy_mute_lookup(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """A runtime new group should fetch mute state once before publishing."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2390,7 +2315,6 @@ def test_first_message_in_new_group_triggers_single_lazy_mute_lookup(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2404,7 +2328,6 @@ def test_first_message_in_new_group_triggers_single_lazy_mute_lookup(
                     "raw_message": "new group",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "group:2"
             assert inbound.metadata["ctx_message_ids"] == ["mute-7"]
@@ -2418,7 +2341,6 @@ def test_first_message_in_new_group_triggers_single_lazy_mute_lookup(
 
 def test_same_group_waiters_share_one_mute_lookup(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Queued messages for the same unknown group should reuse one lookup."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2467,7 +2389,6 @@ def test_same_group_waiters_share_one_mute_lookup(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2494,7 +2415,6 @@ def test_same_group_waiters_share_one_mute_lookup(
             await _wait_for(lambda: get_group_shut_list_calls == 1)
             gate.set()
 
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             first = await _consume_inbound(bus)
             second = await _consume_inbound(bus)
             assert first.metadata["ctx_message_ids"] == ["mute-8a"]
@@ -2508,7 +2428,6 @@ def test_same_group_waiters_share_one_mute_lookup(
 
 def test_wildcard_allow_from_allows_private_inbound(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Wildcard allow_from should allow private inbound from any sender."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2525,7 +2444,6 @@ def test_wildcard_allow_from_allows_private_inbound(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2538,12 +2456,10 @@ def test_wildcard_allow_from_allows_private_inbound(
                     "raw_message": "wildcard",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            assert snapshot["private:456"][0]["sender_id"] == "456"
+            buffered = channel._buffer.get("private:456", "9105")
+            assert buffered is not None
+            assert buffered.sender_id == "456"
             assert inbound.chat_id == "private:456"
             assert inbound.sender_id == "456"
             assert inbound.metadata["ctx_message_ids"] == ["9105"]
@@ -2556,7 +2472,6 @@ def test_wildcard_allow_from_allows_private_inbound(
 
 def test_empty_allow_from_rejects_private_inbound_before_cache(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Empty allow_from should reject private inbound before cache and publish."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2573,7 +2488,6 @@ def test_empty_allow_from_rejects_private_inbound_before_cache(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2589,7 +2503,6 @@ def test_empty_allow_from_rejects_private_inbound_before_cache(
             with pytest.raises(asyncio.TimeoutError):
                 await _consume_inbound(bus, timeout=0.2)
             assert channel._buffer.get("private:123", "9106") is None
-            assert not channel._inbound_cache_path.exists()
         finally:
             await _stop_channel(channel, task, server)
 
@@ -2643,7 +2556,6 @@ def test_allowlisted_inbound_is_cached_without_publish(
 @pytest.mark.parametrize("raw_message", ["/status", "   /STATUS   "])
 def test_status_slash_bypasses_private_probability(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     raw_message: str,
 ) -> None:
     """Authorized /status should bypass normal gating."""
@@ -2662,7 +2574,6 @@ def test_status_slash_bypasses_private_probability(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2675,14 +2586,11 @@ def test_status_slash_bypasses_private_probability(
                     "raw_message": raw_message,
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            metadata = snapshot["private:123"][0]["metadata"]
-            assert metadata["trigger_reason"] == "slash_status"
-            assert metadata["slash_command"] == "status"
+            buffered = channel._buffer.get("private:123", "9301")
+            assert buffered is not None
+            assert buffered.metadata["trigger_reason"] == "slash_status"
+            assert buffered.metadata["slash_command"] == "status"
             assert inbound.content.strip().lower() == "/status"
             assert inbound.metadata["trigger_reason"] == "slash_status"
             assert inbound.metadata["slash_command"] == "status"
@@ -2696,7 +2604,6 @@ def test_status_slash_bypasses_private_probability(
 
 def test_non_admin_slash_command_is_rejected_before_cache(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Non-admin slash commands should stop before cache and publish."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2713,7 +2620,6 @@ def test_non_admin_slash_command_is_rejected_before_cache(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2729,7 +2635,6 @@ def test_non_admin_slash_command_is_rejected_before_cache(
             with pytest.raises(asyncio.TimeoutError):
                 await _consume_inbound(bus, timeout=0.2)
             assert channel._buffer.get("private:123", "9302") is None
-            assert not channel._inbound_cache_path.exists()
         finally:
             await _stop_channel(channel, task, server)
 
@@ -2738,7 +2643,6 @@ def test_non_admin_slash_command_is_rejected_before_cache(
 
 def test_admin_slash_command_bypasses_private_routing(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Authorized slash commands should publish even when private routing would drop."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2756,7 +2660,6 @@ def test_admin_slash_command_bypasses_private_routing(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2769,15 +2672,12 @@ def test_admin_slash_command_bypasses_private_routing(
                     "raw_message": "/restart",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            snapshot = json.loads(
-                channel._inbound_cache_path.read_text(encoding="utf-8")
-            )
-            metadata = snapshot["private:123"][0]["metadata"]
+            buffered = channel._buffer.get("private:123", "9303")
+            assert buffered is not None
             assert inbound.content == "/restart"
-            assert metadata["trigger_reason"] == "slash_command"
-            assert metadata["slash_command"] == "restart"
+            assert buffered.metadata["trigger_reason"] == "slash_command"
+            assert buffered.metadata["slash_command"] == "restart"
             assert inbound.metadata["trigger_reason"] == "slash_command"
             assert inbound.metadata["slash_command"] == "restart"
             assert inbound.metadata["ctx_message_ids"] == ["9303"]
@@ -2791,7 +2691,6 @@ def test_admin_slash_command_bypasses_private_routing(
 
 def test_statusx_is_treated_as_normal_slash_command(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Non-status slash commands should also bypass normal routing when authorized."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2809,7 +2708,6 @@ def test_statusx_is_treated_as_normal_slash_command(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2822,7 +2720,6 @@ def test_statusx_is_treated_as_normal_slash_command(
                     "raw_message": "/statusx",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.content == "/statusx"
             assert inbound.metadata["trigger_reason"] == "slash_command"
@@ -2885,7 +2782,6 @@ def test_routed_poke_serializes_into_ctx(
 
 def test_group_poke_accepts_matching_group_id(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Group poke should pass when allow_from contains the group ID."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -2902,7 +2798,6 @@ def test_group_poke_accepts_matching_group_id(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2917,7 +2812,6 @@ def test_group_poke_accepts_matching_group_id(
                     "target_id": "42",
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "group:456"
             assert inbound.sender_id == "123"
@@ -2961,7 +2855,6 @@ def test_allowed_private_image_inbound_downloads_to_media_cache(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -2983,7 +2876,6 @@ def test_allowed_private_image_inbound_downloads_to_media_cache(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             media_path = (tmp_path / "media" / "a.png").resolve()
             assert media_path.read_bytes() == b"test"
@@ -3075,7 +2967,6 @@ def test_group_inbound_attaches_history_only_image_from_unread_window(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3098,7 +2989,6 @@ def test_group_inbound_attaches_history_only_image_from_unread_window(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             with pytest.raises(asyncio.TimeoutError):
                 await _consume_inbound(bus, timeout=0.2)
 
@@ -3188,7 +3078,6 @@ def test_group_inbound_attaches_history_and_trigger_images_from_unread_window(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3211,7 +3100,6 @@ def test_group_inbound_attaches_history_and_trigger_images_from_unread_window(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             with pytest.raises(asyncio.TimeoutError):
                 await _consume_inbound(bus, timeout=0.2)
 
@@ -3265,7 +3153,6 @@ def test_group_inbound_attaches_history_and_trigger_images_from_unread_window(
 
 def test_group_at_uses_group_member_info_when_segment_lacks_profile(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Group mentions should fallback to get_group_member_info for card/nickname."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -3306,7 +3193,6 @@ def test_group_at_uses_group_member_info_when_segment_lacks_profile(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3362,7 +3248,6 @@ def test_disallowed_private_image_inbound_skips_download(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3433,7 +3318,6 @@ def test_cached_private_image_inbound_skips_redownload(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3455,7 +3339,6 @@ def test_cached_private_image_inbound_skips_redownload(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             buffered = channel._buffer.get("private:123", "9203")
             assert buffered is not None
@@ -3504,7 +3387,6 @@ def test_oversized_private_image_inbound_keeps_placeholder_only(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3526,7 +3408,6 @@ def test_oversized_private_image_inbound_keeps_placeholder_only(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             buffered = channel._buffer.get("private:123", "9204")
             assert buffered is not None
@@ -3575,7 +3456,6 @@ def test_allowed_private_voice_inbound_downloads_and_transcribes(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3597,7 +3477,6 @@ def test_allowed_private_voice_inbound_downloads_and_transcribes(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             media_path = tmp_path / "media" / "hello.wav"
             assert media_path.read_bytes() == b"voice"
@@ -3678,7 +3557,6 @@ def test_disallowed_private_voice_inbound_skips_download_and_transcription(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3757,7 +3635,6 @@ def test_cached_private_voice_inbound_skips_redownload_but_still_transcribes(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3779,7 +3656,6 @@ def test_cached_private_voice_inbound_skips_redownload_but_still_transcribes(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             buffered = channel._buffer.get("private:123", "9303")
             assert buffered is not None
@@ -3848,7 +3724,6 @@ def test_oversized_private_voice_inbound_keeps_placeholder_only(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3870,7 +3745,6 @@ def test_oversized_private_voice_inbound_keeps_placeholder_only(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             buffered = channel._buffer.get("private:123", "9304")
             assert buffered is not None
@@ -3929,7 +3803,6 @@ def test_allowed_private_voice_inbound_transcodes_amr_before_transcription(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -3951,7 +3824,6 @@ def test_allowed_private_voice_inbound_transcodes_amr_before_transcription(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             buffered = channel._buffer.get("private:123", "9307")
             assert buffered is not None
@@ -4040,7 +3912,6 @@ def test_private_voice_inbound_keeps_placeholder_when_transcoding_fails(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -4062,7 +3933,6 @@ def test_private_voice_inbound_keeps_placeholder_when_transcoding_fails(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             buffered = channel._buffer.get("private:123", "9308")
             assert buffered is not None
@@ -4138,7 +4008,6 @@ def test_private_image_inbound_keeps_placeholder_when_download_times_out(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -4160,7 +4029,6 @@ def test_private_image_inbound_keeps_placeholder_when_download_times_out(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             buffered = channel._buffer.get("private:123", "9310")
             assert buffered is not None
@@ -4213,7 +4081,6 @@ def test_private_voice_inbound_keeps_placeholder_when_transcoding_times_out(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -4235,7 +4102,6 @@ def test_private_voice_inbound_keeps_placeholder_when_transcoding_times_out(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             buffered = channel._buffer.get("private:123", "9311")
             assert buffered is not None
@@ -4311,7 +4177,6 @@ def test_private_video_and_file_inbound_is_dropped(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -4345,7 +4210,6 @@ def test_private_video_and_file_inbound_is_dropped(
             with pytest.raises(asyncio.TimeoutError):
                 await _consume_inbound(bus, timeout=0.2)
             assert channel._buffer.get("private:123", "9305") is None
-            assert not channel._inbound_cache_path.exists()
             assert not (tmp_path / "media").exists()
         finally:
             await _stop_channel(channel, task, server)
@@ -4365,7 +4229,6 @@ def test_private_video_and_file_inbound_is_dropped(
 
 def test_private_text_with_video_and_file_inbound_keeps_only_text(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Mixed messages should ignore unsupported video/file segments."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
@@ -4382,7 +4245,6 @@ def test_private_text_with_video_and_file_inbound_keeps_only_text(
             },
             bus,
         )
-        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
         task = asyncio.create_task(channel.start())
         try:
             await _wait_for(lambda: channel._self_id == "42")
@@ -4417,7 +4279,6 @@ def test_private_text_with_video_and_file_inbound_keeps_only_text(
                     ],
                 }
             )
-            await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             buffered = channel._buffer.get("private:123", "9306")
             assert buffered is not None

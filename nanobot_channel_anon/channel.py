@@ -8,7 +8,7 @@ import contextlib
 import hashlib
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -56,7 +56,6 @@ _MEDIA_DOWNLOAD_TIMEOUT_S = 30.0
 _FFMPEG_TIMEOUT_S = 30.0
 _OUTBOUND_UPLOAD_CHUNK_SIZE = 64 * 1024
 _OUTBOUND_UPLOAD_FILE_RETENTION_MS = 30 * 1000
-_INBOUND_CACHE_PATH = Path(".anon_inbound_buffer.json")
 _SUPPORTED_TRANSCRIPTION_SUFFIXES = {
     ".flac",
     ".m4a",
@@ -111,7 +110,6 @@ class AnonChannel(BaseChannel):
         self._group_mute_warmup_task: asyncio.Task[None] | None = None
         self._buffer = Buffer(self.config.max_context_messages)
         self._router = InboundRouter(self.config)
-        self._inbound_cache_path = _INBOUND_CACHE_PATH
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -989,7 +987,6 @@ class AnonChannel(BaseChannel):
             buffer=self._buffer,
             expanded_forwards=processed.expanded_forwards,
         )
-        self._write_inbound_cache_file()
         if routed is None:
             logger.debug(
                 "Anon dropped inbound candidate: event_kind={} chat_id={}",
@@ -1037,20 +1034,6 @@ class AnonChannel(BaseChannel):
                 routed.chat_id,
                 serialized.message_ids,
             )
-
-    def _write_inbound_cache_file(self) -> None:
-        snapshot = {
-            chat_id: [
-                asdict(entry)
-                for entry in entries.values()
-                if not entry.is_from_self
-            ]
-            for chat_id, entries in self._buffer._messages.items()
-        }
-        self._inbound_cache_path.write_text(
-            json.dumps(snapshot, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
 
     async def _handle_disconnect(
         self,
