@@ -241,9 +241,21 @@ async def process_inbound_candidate(
 ) -> InboundProcessingResult:
     """补充媒体、forward 语义结果, 供调用方写入最近消息缓存."""
     set_reply_target_from_self(candidate, buffer)
-    candidate.media = await _download_candidate_images(candidate, image_downloader)
-    await _process_candidate_voices(candidate, voice_processor)
-    expanded_forwards = await _expand_candidate_forwards(candidate, forward_resolver)
+    candidate.media = await _download_media_items(
+        _list_value(candidate.metadata.get("media_items")),
+        image_downloader,
+    )
+    candidate.content = await _process_voice_media_items(
+        candidate.content,
+        _list_value(candidate.metadata.get("media_items")),
+        voice_processor,
+    )
+    expanded_forwards = await _expand_candidate_forwards(
+        candidate,
+        forward_resolver,
+        image_downloader=image_downloader,
+        voice_processor=voice_processor,
+    )
     candidate.metadata["expanded_forwards"] = [
         _forward_entry_metadata(item) for item in expanded_forwards
     ]
@@ -253,15 +265,15 @@ async def process_inbound_candidate(
     )
 
 
-async def _download_candidate_images(
-    candidate: InboundCandidate,
+async def _download_media_items(
+    media_items: list[dict[str, Any]],
     image_downloader: ImageDownloader | None,
 ) -> list[str]:
     if image_downloader is None:
         return []
 
     media_refs: list[str] = []
-    for item in _list_value(candidate.metadata.get("media_items")):
+    for item in media_items:
         if not isinstance(item, dict) or item.get("type") != "image":
             continue
         media_ref = await image_downloader(item)
@@ -270,15 +282,16 @@ async def _download_candidate_images(
     return media_refs
 
 
-async def _process_candidate_voices(
-    candidate: InboundCandidate,
+async def _process_voice_media_items(
+    content: str,
+    media_items: list[dict[str, Any]],
     voice_processor: VoiceProcessor | None,
-) -> None:
+) -> str:
     if voice_processor is None:
-        return
+        return content
 
     replacements: list[str | None] = []
-    for item in _list_value(candidate.metadata.get("media_items")):
+    for item in media_items:
         if not isinstance(item, dict) or item.get("type") != "record":
             continue
 
@@ -309,13 +322,33 @@ async def _process_candidate_voices(
 
         replacements.append(replacement)
 
-    if replacements:
-        candidate.content = _replace_voice_placeholders(candidate.content, replacements)
+    if not replacements:
+        return content
+    return _replace_voice_placeholders(content, replacements)
+
+
+async def _enhance_forward_entry_media(
+    forward: ForwardEntry,
+    *,
+    image_downloader: ImageDownloader | None,
+    voice_processor: VoiceProcessor | None,
+) -> ForwardEntry:
+    for node in forward.nodes:
+        node.media = await _download_media_items(node.media_items, image_downloader)
+        node.content = await _process_voice_media_items(
+            node.content,
+            node.media_items,
+            voice_processor,
+        )
+    return forward
 
 
 async def _expand_candidate_forwards(
     candidate: InboundCandidate,
     forward_resolver: ForwardResolver,
+    *,
+    image_downloader: ImageDownloader | None,
+    voice_processor: VoiceProcessor | None,
 ) -> list[ForwardEntry]:
     """展开当前入站消息直接引用的合并转发.
 
@@ -330,21 +363,29 @@ async def _expand_candidate_forwards(
     for ref in candidate.forward_refs:
         if ref.embedded_nodes:
             expanded.append(
-                _build_forward_entry(
-                    forward_id=ref.forward_id,
-                    summary=ref.summary,
-                    raw_nodes=ref.embedded_nodes,
+                await _enhance_forward_entry_media(
+                    _build_forward_entry(
+                        forward_id=ref.forward_id,
+                        summary=ref.summary,
+                        raw_nodes=ref.embedded_nodes,
+                    ),
+                    image_downloader=image_downloader,
+                    voice_processor=voice_processor,
                 )
             )
             continue
 
         if not ref.forward_id:
             expanded.append(
-                _build_forward_entry(
-                    forward_id=None,
-                    summary=ref.summary,
-                    raw_nodes=[],
-                    unresolved=True,
+                await _enhance_forward_entry_media(
+                    _build_forward_entry(
+                        forward_id=None,
+                        summary=ref.summary,
+                        raw_nodes=[],
+                        unresolved=True,
+                    ),
+                    image_downloader=image_downloader,
+                    voice_processor=voice_processor,
                 )
             )
             continue
@@ -353,20 +394,28 @@ async def _expand_candidate_forwards(
             response_data = await forward_resolver(ref.forward_id)
             raw_nodes = _extract_forward_nodes(response_data)
             expanded.append(
-                _build_forward_entry(
-                    forward_id=ref.forward_id,
-                    summary=ref.summary,
-                    raw_nodes=raw_nodes,
-                    unresolved=not raw_nodes,
+                await _enhance_forward_entry_media(
+                    _build_forward_entry(
+                        forward_id=ref.forward_id,
+                        summary=ref.summary,
+                        raw_nodes=raw_nodes,
+                        unresolved=not raw_nodes,
+                    ),
+                    image_downloader=image_downloader,
+                    voice_processor=voice_processor,
                 )
             )
         except Exception:
             expanded.append(
-                _build_forward_entry(
-                    forward_id=ref.forward_id,
-                    summary=ref.summary,
-                    raw_nodes=[],
-                    unresolved=True,
+                await _enhance_forward_entry_media(
+                    _build_forward_entry(
+                        forward_id=ref.forward_id,
+                        summary=ref.summary,
+                        raw_nodes=[],
+                        unresolved=True,
+                    ),
+                    image_downloader=image_downloader,
+                    voice_processor=voice_processor,
                 )
             )
     return expanded
@@ -475,8 +524,11 @@ def _build_forward_node(node: dict[str, Any]) -> ForwardNodeEntry:
     if content_source is None:
         content_source = data.get("message")
 
-    parsed = _parse_forward_message_segments(content_source)
-    content = parsed.text or string_value(data.get("raw_message")) or ""
+    segments = _segments_from_message(content_source)
+    parsed = _parse_forward_message_segments(segments)
+    content = parsed.text
+    if not content and not _has_only_ignored_media_segments(segments):
+        content = string_value(data.get("raw_message")) or ""
 
     return ForwardNodeEntry(
         sender_id=sender_id,
@@ -494,7 +546,9 @@ def _build_forward_node(node: dict[str, Any]) -> ForwardNodeEntry:
     )
 
 
-def _parse_forward_message_segments(message: Any) -> ParsedMessage:
+def _parse_forward_message_segments(
+    message: Any | list[OneBotMessageSegment],
+) -> ParsedMessage:
     text_parts: list[str] = []
     media: list[str] = []
     media_items: list[dict[str, Any]] = []
@@ -502,7 +556,14 @@ def _parse_forward_message_segments(message: Any) -> ParsedMessage:
     reply_to_message_id: str | None = None
     segment_types: list[str] = []
 
-    for segment in _segments_from_message(message):
+    segments = (
+        message
+        if isinstance(message, list)
+        and all(isinstance(item, OneBotMessageSegment) for item in message)
+        else _segments_from_message(message)
+    )
+
+    for segment in segments:
         segment_types.append(segment.type)
         data = segment.data
 

@@ -664,3 +664,101 @@ def test_serialize_chat_entries_aggregates_media_in_order_and_dedupes() -> None:
 
     assert serialized is not None
     assert serialized.media == ["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"]
+
+
+def test_serialize_chat_entries_keeps_distinct_images_with_same_basename() -> None:
+    """Different image refs with the same basename should keep separate image IDs."""
+    serialized = serialize_chat_entries(
+        "private:123",
+        [
+            MessageEntry(
+                message_id="9003006",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="[image]",
+                media=["https://example.com/one/download"],
+                media_items=[
+                    {"type": "image", "url": "https://example.com/one/download"}
+                ],
+                render_segments=[{"type": "image", "index": "0"}],
+            ),
+            MessageEntry(
+                message_id="9003007",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="[image]",
+                media=["https://example.com/two/download"],
+                media_items=[
+                    {"type": "image", "url": "https://example.com/two/download"}
+                ],
+                render_segments=[{"type": "image", "index": "0"}],
+            ),
+        ],
+        self_id="42",
+    )
+
+    assert serialized is not None
+    assert serialized.media == [
+        "https://example.com/one/download",
+        "https://example.com/two/download",
+    ]
+    assert serialized.text.count("I|i0|download") == 1
+    assert serialized.text.count("I|i1|download") == 1
+    assert "M|9003006|peer|[i0]" in serialized.text
+    assert "M|9003007|peer|[i1]" in serialized.text
+
+
+def test_serialize_chat_entries_collects_forward_node_media() -> None:
+    """Forward node media should be included in serialized multimodal attachments."""
+    serialized = serialize_chat_entries(
+        "private:123",
+        [
+            MessageEntry(
+                message_id="9003008",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="看看[forward]",
+                expanded_forwards=[
+                    ForwardEntry(
+                        forward_id="fwd-1",
+                        summary="转发",
+                        nodes=[
+                            ForwardNodeEntry(
+                                message_id="inner-1",
+                                sender_id="8",
+                                sender_name="Bob",
+                                source_chat_id=None,
+                                content="[image]",
+                                media=["/tmp/forward-a.png", "/tmp/forward-b.png"],
+                                media_items=[
+                                    {"type": "image", "file": "/tmp/forward-a.png"},
+                                    {"type": "image", "file": "/tmp/forward-b.png"},
+                                ],
+                                render_segments=[
+                                    {"type": "image", "index": "0"},
+                                    {"type": "image", "index": "1"},
+                                ],
+                            )
+                        ],
+                    )
+                ],
+                render_segments=[
+                    {"type": "text", "text": "看看"},
+                    {"type": "forward"},
+                ],
+            )
+        ],
+        self_id="42",
+    )
+
+    assert serialized is not None
+    assert serialized.media == ["/tmp/forward-a.png", "/tmp/forward-b.png"]
+    assert "I|i0|forward-a.png" in serialized.text
+    assert "I|i1|forward-b.png" in serialized.text
+    assert "N|0|u0|[i0][i1]" in serialized.text

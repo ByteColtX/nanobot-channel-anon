@@ -377,14 +377,22 @@ class _CTXBuilder:
     def _collect_media(entries: list[MessageEntry]) -> list[str]:
         media: list[str] = []
         seen: set[str] = set()
+
+        def append_media(media_ref: str) -> None:
+            if media_ref in seen:
+                return
+            seen.add(media_ref)
+            media.append(media_ref)
+
         for entry in entries:
             if entry.metadata.get("event_kind") == "poke":
                 continue
             for media_ref in entry.media:
-                if media_ref in seen:
-                    continue
-                seen.add(media_ref)
-                media.append(media_ref)
+                append_media(media_ref)
+            for forward in entry.expanded_forwards:
+                for node in forward.nodes:
+                    for media_ref in node.media:
+                        append_media(media_ref)
         return media
 
     def _ensure_user(
@@ -445,12 +453,12 @@ class _CTXBuilder:
 
     def _ensure_image(self, media_ref: str) -> str:
         filename = self._basename(media_ref)
-        existing_iid = self._image_ids.get(filename)
+        existing_iid = self._image_ids.get(media_ref)
         if existing_iid is not None:
             return existing_iid
         iid = f"i{len(self._images)}"
         self._images.append(_ImageRow(iid=iid, filename=filename))
-        self._image_ids[filename] = iid
+        self._image_ids[media_ref] = iid
         return iid
 
     def _ensure_voice(self, media_item: dict[str, str]) -> str:

@@ -942,6 +942,94 @@ def test_reader_marks_get_forward_msg_null_data_unresolved(
     asyncio.run(case())
 
 
+
+def test_reader_forward_node_ignores_unsupported_video_raw_cq(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Forward nodes with unsupported-only media should not leak raw CQ into CTX."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> None:
+        del server
+        if payload.get("action") != "get_forward_msg":
+            return
+        await ws.send_json(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "messages": [
+                        {
+                            "data": {
+                                "user_id": "8",
+                                "nickname": "Bob",
+                                "content": [
+                                    {
+                                        "type": "video",
+                                        "data": {
+                                            "file": "clip.mp4",
+                                            "url": "https://example.com/clip.mp4",
+                                            "file_size": "456",
+                                        },
+                                    }
+                                ],
+                                "raw_message": "[CQ:video,file=clip.mp4]",
+                            }
+                        }
+                    ]
+                },
+                "echo": payload["echo"],
+            }
+        )
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "private_trigger_prob": 1.0,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._ws is not None)
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message_id": "704",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "text", "data": {"text": "看看"}},
+                        {"type": "forward", "data": {"id": "fwd-video"}},
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+            snapshot = json.loads(
+                channel._inbound_cache_path.read_text(encoding="utf-8")
+            )
+            expanded = snapshot["private:123"][0]["metadata"]["expanded_forwards"][0]
+            assert expanded["nodes"][0]["content"] == ""
+            assert "[CQ:video" not in inbound.content
+            assert "N|0|u0|" in inbound.content
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
 def test_channel_reconnects_after_disconnect(monkeypatch: pytest.MonkeyPatch) -> None:
     """A dropped socket should trigger the reconnect loop."""
     monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)

@@ -790,6 +790,183 @@ def test_process_inbound_candidate_leaves_forward_source_unknown() -> None:
 
 
 
+def test_process_inbound_candidate_ignores_forward_node_raw_cq_for_video_file() -> None:
+    """Forward nodes with unsupported-only media should not leak raw CQ text."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "message_id": "703",
+            "user_id": "123",
+            "message": [{"type": "forward", "data": {"id": "fwd-video"}}],
+        }
+    )
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+    assert candidate is not None
+
+    async def _resolve_forward(_forward_id: str) -> object:
+        return {
+            "messages": [
+                {
+                    "data": {
+                        "user_id": "8",
+                        "nickname": "Bob",
+                        "content": [
+                            {
+                                "type": "video",
+                                "data": {
+                                    "file": "clip.mp4",
+                                    "url": "https://example.com/clip.mp4",
+                                    "file_size": "456",
+                                },
+                            },
+                            {
+                                "type": "file",
+                                "data": {
+                                    "file": "archive.zip",
+                                    "url": "https://example.com/archive.zip",
+                                    "file_size": "789",
+                                },
+                            },
+                        ],
+                        "raw_message": (
+                            "[CQ:video,file=clip.mp4]"
+                            "[CQ:file,file=archive.zip]"
+                        ),
+                    }
+                }
+            ]
+        }
+
+    processed = asyncio.run(
+        process_inbound_candidate(
+            candidate,
+            buffer=Buffer(max_messages=10),
+            forward_resolver=_resolve_forward,
+        )
+    )
+
+    node = processed.expanded_forwards[0].nodes[0]
+    assert node.content == ""
+    assert node.segment_types == ["video", "file"]
+
+
+
+def test_process_inbound_candidate_enhances_forward_node_media() -> None:
+    """Forward node images and voices should use the same enhancement pipeline."""
+    raw = OneBotRawEvent.model_validate(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "message_id": "704",
+            "user_id": "123",
+            "message": [{"type": "forward", "data": {"id": "fwd-media"}}],
+        }
+    )
+    candidate = normalize_inbound_event(
+        raw,
+        config=AnonConfig(max_text_length=200),
+        self_id="42",
+    )
+    assert candidate is not None
+
+    seen_images: list[dict[str, str]] = []
+    seen_voices: list[dict[str, str]] = []
+
+    async def _resolve_forward(_forward_id: str) -> object:
+        return {
+            "messages": [
+                {
+                    "data": {
+                        "user_id": "8",
+                        "nickname": "Bob",
+                        "content": [
+                            {
+                                "type": "image",
+                                "data": {
+                                    "file": "a.png",
+                                    "url": "https://example.com/a.png",
+                                    "file_size": "123",
+                                },
+                            },
+                            {
+                                "type": "record",
+                                "data": {
+                                    "file": "hello.amr",
+                                    "url": "https://example.com/hello.amr",
+                                    "file_size": "456",
+                                },
+                            },
+                        ],
+                    }
+                }
+            ]
+        }
+
+    async def _download_image(item: dict[str, str]) -> str | None:
+        seen_images.append(dict(item))
+        return "file:///tmp/a.png"
+
+    async def _process_voice(item: dict[str, str]) -> dict[str, str] | None:
+        seen_voices.append(dict(item))
+        return {
+            "local_file_uri": "file:///tmp/hello.amr",
+            "transcription_text": "今晚八点开会",
+        }
+
+    processed = asyncio.run(
+        process_inbound_candidate(
+            candidate,
+            buffer=Buffer(max_messages=10),
+            forward_resolver=_resolve_forward,
+            image_downloader=_download_image,
+            voice_processor=_process_voice,
+        )
+    )
+
+    node = processed.expanded_forwards[0].nodes[0]
+    assert node.media == ["file:///tmp/a.png"]
+    assert node.content == "[image][transcription: 今晚八点开会]"
+    assert node.media_items == [
+        {
+            "type": "image",
+            "file": "a.png",
+            "url": "https://example.com/a.png",
+            "file_size": "123",
+        },
+        {
+            "type": "record",
+            "file": "hello.amr",
+            "url": "https://example.com/hello.amr",
+            "file_size": "456",
+            "local_file_uri": "file:///tmp/hello.amr",
+            "transcription_text": "今晚八点开会",
+            "transcription_status": "success",
+        },
+    ]
+    assert seen_images == [
+        {
+            "type": "image",
+            "file": "a.png",
+            "url": "https://example.com/a.png",
+            "file_size": "123",
+        }
+    ]
+    assert seen_voices == [
+        {
+            "type": "record",
+            "file": "hello.amr",
+            "url": "https://example.com/hello.amr",
+            "file_size": "456",
+        }
+    ]
+
+
+
 def test_normalize_unsupported_event_returns_none() -> None:
     """Meta events should be ignored by inbound normalization."""
     raw = OneBotRawEvent.model_validate(
