@@ -1477,11 +1477,117 @@ def test_group_reply_only_triggers_for_bot_message(
             assert inbound.chat_id == "group:2"
             assert inbound.sender_id == "123"
             assert inbound.metadata["trigger_reason"] == "reply"
-            assert inbound.metadata["cqmsg_message_ids"] == ["9013", "9100"]
-            assert inbound.metadata["cqmsg_count"] == 2
+            assert inbound.metadata["cqmsg_message_ids"] == ["9100"]
+            assert inbound.metadata["cqmsg_count"] == 1
             assert "M|9013|u0|hello" in inbound.content
             assert "M|9100|u1|>m:9013 收到" in inbound.content
             assert channel._buffer.get_unconsumed_chat_entries("group:2") == []
+        finally:
+            await _stop_channel(channel, task, server)
+
+    asyncio.run(case())
+
+
+def test_group_reply_backfills_evicted_target_via_get_msg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Evicted reply targets should be restored through get_msg before CQMSG."""
+    monkeypatch.setattr(channel_module, "_RECONNECT_INTERVAL_S", 0.05)
+
+    async def on_action(
+        server: OneBotWebSocketServer,
+        payload: dict[str, Any],
+        ws: web.WebSocketResponse,
+    ) -> bool:
+        del server
+        if payload.get("action") == "get_msg":
+            await ws.send_json(
+                {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {
+                        "time": 1710000000,
+                        "message_type": "group",
+                        "group_id": "2",
+                        "message_id": 9013,
+                        "real_id": 9013,
+                        "sender": {
+                            "user_id": 42,
+                            "nickname": "anon-bot",
+                        },
+                        "message": "hello",
+                    },
+                    "echo": payload["echo"],
+                    "message": "",
+                    "wording": "",
+                    "stream": "normal-action",
+                }
+            )
+            return True
+        return False
+
+    async def case() -> None:
+        server = OneBotWebSocketServer(on_action=on_action)
+        await server.start()
+        bus = MessageBus()
+        channel = AnonChannel(
+            {
+                "ws_url": server.url,
+                "allow_from": ["123"],
+                "group_trigger_prob": 0.0,
+                "max_context_messages": 1,
+            },
+            bus,
+        )
+        channel._inbound_cache_path = tmp_path / "inbound-buffer.json"
+        task = asyncio.create_task(channel.start())
+        try:
+            await _wait_for(lambda: channel._self_id == "42")
+            channel._buffer.add(
+                MessageEntry(
+                    message_id="9013",
+                    chat_id="group:2",
+                    sender_id="42",
+                    sender_name="anon-bot",
+                    is_from_self=True,
+                    content="hello",
+                )
+            )
+            channel._buffer.add(
+                MessageEntry(
+                    message_id="evictor",
+                    chat_id="group:2",
+                    sender_id="999",
+                    sender_name="peer",
+                    is_from_self=False,
+                    content="filler",
+                )
+            )
+            assert channel._buffer.get("group:2", "9013") is None
+
+            await server.send_json(
+                {
+                    "post_type": "message",
+                    "message_type": "group",
+                    "message_id": "9100",
+                    "group_id": "2",
+                    "user_id": "123",
+                    "message": [
+                        {"type": "reply", "data": {"id": "9013"}},
+                        {"type": "text", "data": {"text": "收到"}},
+                    ],
+                }
+            )
+            await _wait_for(lambda: channel._inbound_cache_path.exists())
+            inbound = await _consume_inbound(bus)
+
+            assert inbound.metadata["cqmsg_message_ids"] == ["9100"]
+            assert inbound.metadata["cqmsg_count"] == 1
+            assert "M|9013|u0|hello" in inbound.content
+            assert "M|9100|u1|>m:9013 收到" in inbound.content
+            get_msg_action = _find_action(server, "get_msg")
+            assert get_msg_action["params"] == {"message_id": 9013}
         finally:
             await _stop_channel(channel, task, server)
 

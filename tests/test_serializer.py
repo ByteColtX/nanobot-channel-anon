@@ -247,7 +247,7 @@ def test_serialize_group_chat_prefers_card_then_nickname_then_qq() -> None:
 
 
 def test_serialize_buffer_chat_is_incremental_until_ack() -> None:
-    """Unread entries should repeat until acknowledged, then only new ones remain."""
+    """Unread CQMSG should exclude self entries while ack still advances past them."""
     buffer = Buffer(max_messages=10)
     buffer.add(
         MessageEntry(
@@ -276,6 +276,10 @@ def test_serialize_buffer_chat_is_incremental_until_ack() -> None:
     assert first is not None
     assert second is not None
     assert first.text == second.text
+    assert first.message_ids == ["1"]
+    assert "M|1|peer|first" in first.text
+    assert "M|2|me|second" not in first.text
+    assert buffer.get_unconsumed_llm_chat_entries("private:123")[0].message_id == "1"
     assert buffer.mark_chat_entries_consumed("private:123", first.message_ids) is True
     assert serialize_buffer_chat(buffer, "private:123", self_id="42") is None
 
@@ -296,26 +300,148 @@ def test_serialize_buffer_chat_is_incremental_until_ack() -> None:
 
 
 def test_mark_chat_entries_consumed_requires_unread_prefix() -> None:
-    """Consumption should reject message IDs that do not match the unread prefix."""
+    """Consumption should reject IDs that do not match unread non-self order."""
     buffer = Buffer(max_messages=10)
-    for message_id in ("1", "2", "3"):
+    for message_id, is_from_self in (("1", False), ("2", True), ("3", False)):
         buffer.add(
             MessageEntry(
                 message_id=message_id,
                 chat_id="private:123",
-                sender_id="123",
-                sender_name="peer",
-                is_from_self=False,
+                sender_id="42" if is_from_self else "123",
+                sender_name="bot" if is_from_self else "peer",
+                is_from_self=is_from_self,
                 content=message_id,
             )
         )
 
-    assert buffer.mark_chat_entries_consumed("private:123", ["2"]) is False
+    assert buffer.mark_chat_entries_consumed("private:123", ["3"]) is False
     unread_ids = [
         entry.message_id
         for entry in buffer.get_unconsumed_chat_entries("private:123")
     ]
     assert unread_ids == ["1", "2", "3"]
+    unread_llm_ids = [
+        entry.message_id
+        for entry in buffer.get_unconsumed_llm_chat_entries("private:123")
+    ]
+    assert unread_llm_ids == ["1", "3"]
+
+
+def test_serialize_buffer_chat_includes_reply_target_context(
+) -> None:
+    """Reply targets should be included in CQMSG text but excluded from ack IDs."""
+    buffer = Buffer(max_messages=10)
+    buffer.add(
+        MessageEntry(
+            message_id="1",
+            chat_id="group:456",
+            sender_id="1001",
+            sender_name="Alice",
+            is_from_self=False,
+            content="original",
+        )
+    )
+    buffer.mark_chat_entries_consumed("group:456", ["1"])
+    buffer.add(
+        MessageEntry(
+            message_id="2",
+            chat_id="group:456",
+            sender_id="1002",
+            sender_name="Bob",
+            is_from_self=False,
+            content="reply",
+            reply_to_message_id="1",
+        )
+    )
+
+    serialized = serialize_buffer_chat(buffer, "group:456", self_id="42")
+
+    assert serialized is not None
+    assert serialized.message_ids == ["2"]
+    assert serialized.count == 1
+    assert "M|1|u1|original" in serialized.text
+    assert "M|2|u2|>m:1 reply" in serialized.text
+
+
+def test_serialize_buffer_chat_includes_self_reply_target_context(
+) -> None:
+    """Replies to self messages should include the quoted bot message in CQMSG text."""
+    buffer = Buffer(max_messages=10)
+    buffer.add(
+        MessageEntry(
+            message_id="1",
+            chat_id="group:456",
+            sender_id="42",
+            sender_name="bot",
+            is_from_self=True,
+            content="hello",
+        )
+    )
+    buffer.add(
+        MessageEntry(
+            message_id="2",
+            chat_id="group:456",
+            sender_id="1002",
+            sender_name="Bob",
+            is_from_self=False,
+            content="reply",
+            reply_to_message_id="1",
+        )
+    )
+
+    serialized = serialize_buffer_chat(buffer, "group:456", self_id="42")
+
+    assert serialized is not None
+    assert serialized.message_ids == ["2"]
+    assert serialized.count == 1
+    assert "M|1|u0|hello" in serialized.text
+    assert "M|2|u1|>m:1 reply" in serialized.text
+
+
+
+def test_serialize_buffer_chat_does_not_restore_evicted_reply_target() -> None:
+    """Evicted reply targets should remain unavailable in CQMSG context."""
+    buffer = Buffer(max_messages=2)
+    buffer.add(
+        MessageEntry(
+            message_id="1",
+            chat_id="group:456",
+            sender_id="1001",
+            sender_name="Alice",
+            is_from_self=False,
+            content="original",
+        )
+    )
+    buffer.add(
+        MessageEntry(
+            message_id="2",
+            chat_id="group:456",
+            sender_id="1003",
+            sender_name="Carol",
+            is_from_self=False,
+            content="filler",
+        )
+    )
+    buffer.mark_chat_entries_consumed("group:456", ["1", "2"])
+    buffer.add(
+        MessageEntry(
+            message_id="3",
+            chat_id="group:456",
+            sender_id="1002",
+            sender_name="Bob",
+            is_from_self=False,
+            content="reply",
+            reply_to_message_id="1",
+        )
+    )
+
+    serialized = serialize_buffer_chat(buffer, "group:456", self_id="42")
+
+    assert serialized is not None
+    assert serialized.message_ids == ["3"]
+    assert serialized.count == 1
+    assert "M|1|" not in serialized.text
+    assert "M|3|u1|>m:1 reply" in serialized.text
 
 
 
