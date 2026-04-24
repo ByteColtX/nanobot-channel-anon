@@ -1,4 +1,4 @@
-"""Tests for CQMSG serialization."""
+"""Tests for CTX serialization."""
 
 import base64
 from pathlib import Path
@@ -22,7 +22,7 @@ _MINIMAL_PNG = base64.b64decode(
 
 
 def test_serialize_private_chat_uses_me_peer_and_forward_rows() -> None:
-    """Private chats should use me/peer aliases and emit F/N rows."""
+    """Private chats should use me/peer aliases and compact F/N rows."""
     entries = [
         MessageEntry(
             message_id="9001001",
@@ -32,6 +32,16 @@ def test_serialize_private_chat_uses_me_peer_and_forward_rows() -> None:
             is_from_self=False,
             content="请看下这张图 [image]",
             media=["https://example.com/assets/sample-image.png"],
+            media_items=[
+                {
+                    "type": "image",
+                    "url": "https://example.com/assets/sample-image.png",
+                }
+            ],
+            render_segments=[
+                {"type": "text", "text": "请看下这张图 "},
+                {"type": "image", "index": "0"},
+            ],
         ),
         MessageEntry(
             message_id="9001002",
@@ -41,6 +51,7 @@ def test_serialize_private_chat_uses_me_peer_and_forward_rows() -> None:
             is_from_self=True,
             content="已收到",
             reply_to_message_id="9001001",
+            render_segments=[{"type": "text", "text": "已收到"}],
         ),
         MessageEntry(
             message_id="9001003",
@@ -49,6 +60,7 @@ def test_serialize_private_chat_uses_me_peer_and_forward_rows() -> None:
             sender_name="示例联系人",
             is_from_self=False,
             content="[forward]",
+            render_segments=[{"type": "forward"}],
             expanded_forwards=[
                 ForwardEntry(
                     forward_id="fwd-1",
@@ -60,6 +72,9 @@ def test_serialize_private_chat_uses_me_peer_and_forward_rows() -> None:
                             sender_name="示例成员甲",
                             source_chat_id="g:123456789",
                             content="今天先同步一下进度",
+                            render_segments=[
+                                {"type": "text", "text": "今天先同步一下进度"}
+                            ],
                         ),
                         ForwardNodeEntry(
                             message_id="inner-1",
@@ -68,6 +83,9 @@ def test_serialize_private_chat_uses_me_peer_and_forward_rows() -> None:
                             source_chat_id="g:123456789",
                             content="我这边继续跟进",
                             reply_to_message_id="inner-0",
+                            render_segments=[
+                                {"type": "text", "text": "我这边继续跟进"}
+                            ],
                         ),
                     ],
                 )
@@ -86,19 +104,19 @@ def test_serialize_private_chat_uses_me_peer_and_forward_rows() -> None:
     assert serialized.count == 3
     assert serialized.text == "\n".join(
         [
-            "<CQMSG/1 bot:me n:3>",
+            "<CTX/1 p:100000005 bot:me n:3>",
             "U|me|100000003|示例机器人|bot",
             "U|peer|100000005|示例联系人",
             "U|u0|100000001|示例成员甲",
             "U|u1|100000004|示例成员丙",
             "I|i0|sample-image.png",
             "M|9001001|peer|请看下这张图 [i0]",
-            "M|9001002|me|>m:9001001 已收到",
+            "M|9001002|me|^9001001 已收到",
             "M|9001003|peer|[F:f0]",
             "F|f0|2|群聊转发内容示例",
-            "N|f0.0|u0|g:123456789|今天先同步一下进度",
-            "N|f0.1|u1|g:123456789|>n:f0.0 我这边继续跟进",
-            "</CQMSG/1>",
+            "N|0|u0|今天先同步一下进度",
+            "N|1|u1|^0 我这边继续跟进",
+            "</CTX/1>",
         ]
     )
 
@@ -114,6 +132,8 @@ def test_serialize_group_chat_uses_un_and_unresolved_forward() -> None:
             is_from_self=False,
             content="[image]",
             media=["/tmp/sample-image.png"],
+            media_items=[{"type": "image", "file": "/tmp/sample-image.png"}],
+            render_segments=[{"type": "image", "index": "0"}],
         ),
         MessageEntry(
             message_id="520815151",
@@ -123,6 +143,7 @@ def test_serialize_group_chat_uses_un_and_unresolved_forward() -> None:
             is_from_self=False,
             content="这张图已收到",
             reply_to_message_id="1489689854",
+            render_segments=[{"type": "text", "text": "这张图已收到"}],
         ),
         MessageEntry(
             message_id="200000001",
@@ -131,6 +152,7 @@ def test_serialize_group_chat_uses_un_and_unresolved_forward() -> None:
             sender_name="示例成员丙",
             is_from_self=False,
             content="[forward]",
+            render_segments=[{"type": "forward"}],
             expanded_forwards=[
                 ForwardEntry(
                     forward_id="fwd-2",
@@ -146,6 +168,7 @@ def test_serialize_group_chat_uses_un_and_unresolved_forward() -> None:
             sender_name="示例机器人",
             is_from_self=True,
             content="收到",
+            render_segments=[{"type": "text", "text": "收到"}],
         ),
     ]
 
@@ -158,18 +181,18 @@ def test_serialize_group_chat_uses_un_and_unresolved_forward() -> None:
     assert serialized is not None
     assert serialized.text == "\n".join(
         [
-            "<CQMSG/1 g:123456789 bot:u0 n:4>",
+            "<CTX/1 g:123456789 bot:u0 n:4>",
             "U|u0|100000003|示例机器人|bot",
             "U|u1|100000002|示例成员乙",
             "U|u2|100000001|示例成员甲",
             "U|u3|100000004|示例成员丙",
             "I|i0|sample-image.png",
             "M|1489689854|u1|[i0]",
-            "M|520815151|u2|>m:1489689854 这张图已收到",
+            "M|520815151|u2|^1489689854 这张图已收到",
             "M|200000001|u3|[F:f0]",
-            "F|f0|0|待补全",
+            "F|f0|0|待补全|!",
             "M|200000002|u0|收到",
-            "</CQMSG/1>",
+            "</CTX/1>",
         ]
     )
 
@@ -202,7 +225,6 @@ def test_serialize_private_chat_prefers_nickname_for_u_rows() -> None:
     assert serialized is not None
     assert "U|peer|123|Alice" in serialized.text
     assert "U|me|42|anon-bot|bot" in serialized.text
-
 
 
 def test_serialize_group_chat_prefers_card_then_nickname_then_qq() -> None:
@@ -245,9 +267,8 @@ def test_serialize_group_chat_prefers_card_then_nickname_then_qq() -> None:
     assert "U|u2|1003|1003" in serialized.text
 
 
-
 def test_serialize_buffer_chat_is_incremental_until_ack() -> None:
-    """Unread CQMSG should exclude self entries while ack still advances past them."""
+    """Unread CTX should exclude self entries while ack still advances past them."""
     buffer = Buffer(max_messages=10)
     buffer.add(
         MessageEntry(
@@ -277,6 +298,7 @@ def test_serialize_buffer_chat_is_incremental_until_ack() -> None:
     assert second is not None
     assert first.text == second.text
     assert first.message_ids == ["1"]
+    assert "<CTX/1 p:123 bot:me n:1>" in first.text
     assert "M|1|peer|first" in first.text
     assert "M|2|me|second" not in first.text
     assert buffer.get_unconsumed_llm_chat_entries("private:123")[0].message_id == "1"
@@ -327,9 +349,8 @@ def test_mark_chat_entries_consumed_requires_unread_prefix() -> None:
     assert unread_llm_ids == ["1", "3"]
 
 
-def test_serialize_buffer_chat_includes_reply_target_context(
-) -> None:
-    """Reply targets should be included in CQMSG text but excluded from ack IDs."""
+def test_serialize_buffer_chat_includes_reply_target_context() -> None:
+    """Reply targets should be included in CTX text but excluded from ack IDs."""
     buffer = Buffer(max_messages=10)
     buffer.add(
         MessageEntry(
@@ -359,13 +380,13 @@ def test_serialize_buffer_chat_includes_reply_target_context(
     assert serialized is not None
     assert serialized.message_ids == ["2"]
     assert serialized.count == 1
+    assert "<CTX/1 g:456 bot:u0 n:1>" in serialized.text
     assert "M|1|u1|original" in serialized.text
-    assert "M|2|u2|>m:1 reply" in serialized.text
+    assert "M|2|u2|^1 reply" in serialized.text
 
 
-def test_serialize_buffer_chat_includes_self_reply_target_context(
-) -> None:
-    """Replies to self messages should include the quoted bot message in CQMSG text."""
+def test_serialize_buffer_chat_includes_self_reply_target_context() -> None:
+    """Replies to self messages should include the quoted bot message in CTX."""
     buffer = Buffer(max_messages=10)
     buffer.add(
         MessageEntry(
@@ -394,13 +415,13 @@ def test_serialize_buffer_chat_includes_self_reply_target_context(
     assert serialized is not None
     assert serialized.message_ids == ["2"]
     assert serialized.count == 1
+    assert "<CTX/1 g:456 bot:u0 n:1>" in serialized.text
     assert "M|1|u0|hello" in serialized.text
-    assert "M|2|u1|>m:1 reply" in serialized.text
-
+    assert "M|2|u1|^1 reply" in serialized.text
 
 
 def test_serialize_buffer_chat_does_not_restore_evicted_reply_target() -> None:
-    """Evicted reply targets should remain unavailable in CQMSG context."""
+    """Evicted reply targets should remain unavailable in CTX context."""
     buffer = Buffer(max_messages=2)
     buffer.add(
         MessageEntry(
@@ -441,12 +462,11 @@ def test_serialize_buffer_chat_does_not_restore_evicted_reply_target() -> None:
     assert serialized.message_ids == ["3"]
     assert serialized.count == 1
     assert "M|1|" not in serialized.text
-    assert "M|3|u1|>m:1 reply" in serialized.text
+    assert "M|3|u1|^1 reply" in serialized.text
 
 
-
-def test_serialize_transcription_text_stays_in_message_body() -> None:
-    """Voice transcription text should serialize as plain M-body text."""
+def test_serialize_chat_entries_renders_voice_rows_for_stt_states() -> None:
+    """Voice rows should distinguish success, failure, and missing STT."""
     serialized = serialize_chat_entries(
         "private:123",
         [
@@ -456,44 +476,97 @@ def test_serialize_transcription_text_stays_in_message_body() -> None:
                 sender_id="123",
                 sender_name="peer",
                 is_from_self=False,
-                content="[transcription: 今晚八点开会]",
-            )
-        ],
-        self_id="42",
-    )
-
-    assert serialized is not None
-    assert "I|" not in serialized.text
-    assert "M|9002001|peer|[transcription: 今晚八点开会]" in serialized.text
-
-
-
-def test_serialize_image_and_transcription_without_audio_rows() -> None:
-    """Mixed image and transcription content should only emit image rows."""
-    serialized = serialize_chat_entries(
-        "private:123",
-        [
+                content="[voice]",
+                media_items=[
+                    {
+                        "type": "record",
+                        "file": "voice-success.amr",
+                        "transcription_text": "今晚八点开会",
+                        "transcription_status": "success",
+                    }
+                ],
+                render_segments=[{"type": "voice", "index": "0"}],
+            ),
             MessageEntry(
                 message_id="9002002",
                 chat_id="private:123",
                 sender_id="123",
                 sender_name="peer",
                 is_from_self=False,
-                content="看下这个 [image] [transcription: 收到语音]",
-                media=["file:///tmp/sample-image.png"],
-            )
+                content="[voice]",
+                media_items=[
+                    {
+                        "type": "record",
+                        "file": "voice-failed.amr",
+                        "local_file_uri": "file:///tmp/voice-failed.amr",
+                        "transcription_status": "failed",
+                    }
+                ],
+                render_segments=[{"type": "voice", "index": "0"}],
+            ),
+            MessageEntry(
+                message_id="9002003",
+                chat_id="private:123",
+                sender_id="123",
+                sender_name="peer",
+                is_from_self=False,
+                content="[voice]",
+                media_items=[
+                    {
+                        "type": "record",
+                        "file": "voice-missing.amr",
+                    }
+                ],
+                render_segments=[{"type": "voice", "index": "0"}],
+            ),
         ],
         self_id="42",
     )
 
     assert serialized is not None
-    assert serialized.text.count("I|") == 1
-    assert "I|i0|sample-image.png" in serialized.text
-    assert (
-        "M|9002002|peer|看下这个 [i0] [transcription: 收到语音]"
-        in serialized.text
+    assert "V|v0|voice-success.amr|=今晚八点开会" in serialized.text
+    assert "V|v1|voice-failed.amr|!" in serialized.text
+    assert "V|v2|voice-missing.amr" in serialized.text
+    assert "M|9002001|peer|[v0]" in serialized.text
+    assert "M|9002002|peer|[v1]" in serialized.text
+    assert "M|9002003|peer|[v2]" in serialized.text
+
+
+def test_serialize_chat_entries_renders_mentions_and_poke_rows() -> None:
+    """Mentions and poke events should use compact CTX symbols."""
+    serialized = serialize_chat_entries(
+        "group:456",
+        [
+            MessageEntry(
+                message_id="notice:poke:1:456:123:42",
+                chat_id="group:456",
+                sender_id="123",
+                sender_name="Alice",
+                is_from_self=False,
+                content="",
+                metadata={"event_kind": "poke"},
+            ),
+            MessageEntry(
+                message_id="2",
+                chat_id="group:456",
+                sender_id="123",
+                sender_name="Alice",
+                is_from_self=False,
+                content="hi all",
+                render_segments=[
+                    {"type": "mention", "user_id": "42"},
+                    {"type": "text", "text": " hi "},
+                    {"type": "mention_all"},
+                ],
+            ),
+        ],
+        self_id="42",
     )
 
+    assert serialized is not None
+    assert "<CTX/1 g:456 bot:u0 n:1>" in serialized.text
+    assert "P|notice:poke:1:456:123:42|u1" in serialized.text
+    assert "M|2|u1|@u0 hi @all" in serialized.text
 
 
 def test_context_builder_attaches_all_unread_window_images(
@@ -560,52 +633,6 @@ def test_context_builder_attaches_all_unread_window_images(
     ]
     assert "I|i0|history.png" in text_blocks[-1]["text"]
     assert "I|i1|trigger.png" in text_blocks[-1]["text"]
-
-
-
-def test_context_builder_attaches_history_only_images_from_unread_window(
-    tmp_path: Path,
-) -> None:
-    """History-only unread-window images should still become multimodal blocks."""
-    history_image = tmp_path / "history.png"
-    history_image.write_bytes(_MINIMAL_PNG)
-
-    serialized = serialize_chat_entries(
-        "private:123",
-        [
-            MessageEntry(
-                message_id="9003003",
-                chat_id="private:123",
-                sender_id="123",
-                sender_name="peer",
-                is_from_self=False,
-                content="只有历史图 [image]",
-                media=[str(history_image)],
-            )
-        ],
-        self_id="42",
-    )
-    assert serialized is not None
-    assert serialized.media == [str(history_image)]
-
-    builder = ContextBuilder(tmp_path)
-    messages = builder.build_messages(
-        history=[],
-        current_message=serialized.text,
-        media=serialized.media,
-        channel="anon",
-        chat_id="private:123",
-    )
-
-    user_content = messages[-1]["content"]
-    assert isinstance(user_content, list)
-    image_blocks = [
-        item
-        for item in user_content
-        if isinstance(item, dict) and item.get("type") == "image_url"
-    ]
-    assert [item["_meta"]["path"] for item in image_blocks] == [str(history_image)]
-
 
 
 def test_serialize_chat_entries_aggregates_media_in_order_and_dedupes() -> None:

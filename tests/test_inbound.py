@@ -95,6 +95,10 @@ def test_normalize_group_message_extracts_mentions_and_reply() -> None:
     assert candidate.mentioned_self is True
     assert candidate.reply_to_message_id == "99"
     assert candidate.metadata["segment_types"] == ["at", "text", "reply"]
+    assert candidate.metadata["render_segments"] == [
+        {"type": "mention", "user_id": "42"},
+        {"type": "text", "text": "hi there"},
+    ]
 
 
 def test_normalize_message_truncates_content() -> None:
@@ -141,7 +145,7 @@ def test_normalize_notice_poke() -> None:
     assert candidate is not None
     assert candidate.event_kind == "poke"
     assert candidate.chat_id == "group:456"
-    assert candidate.content == "[notice:poke] 戳了戳你"
+    assert candidate.content == ""
     assert candidate.metadata["target_id"] == "42"
     assert candidate.metadata["message_id"] == "notice:poke:1776818315:456:123:42"
 
@@ -480,6 +484,7 @@ def test_process_inbound_candidate_transcribes_voice() -> None:
             "file_size": "123",
             "local_file_uri": "file:///tmp/hello.amr",
             "transcription_text": "今晚八点开会",
+            "transcription_status": "success",
         }
     ]
     assert seen_items == [
@@ -544,6 +549,7 @@ def test_process_inbound_candidate_keeps_voice_placeholder_when_transcription_fa
             "url": "https://example.com/hello.amr",
             "file_size": "123",
             "local_file_uri": "file:///tmp/hello.amr",
+            "transcription_status": "failed",
         }
     ]
 

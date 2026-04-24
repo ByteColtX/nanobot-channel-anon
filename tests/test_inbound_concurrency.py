@@ -184,7 +184,7 @@ def test_inbound_events_preserve_arrival_order_per_chat() -> None:
             slow_gate.set()
 
             published = await _consume_published(bus, 2)
-            published_ids = [msg.metadata["cqmsg_message_ids"] for msg in published]
+            published_ids = [msg.metadata["ctx_message_ids"] for msg in published]
             assert published_ids == [["1"], ["2"]]
         finally:
             slow_gate.set()
@@ -193,7 +193,7 @@ def test_inbound_events_preserve_arrival_order_per_chat() -> None:
     asyncio.run(case())
 
 
-def test_overlapping_inbound_events_do_not_duplicate_cqmsg_context() -> None:
+def test_overlapping_inbound_events_do_not_duplicate_ctx_context() -> None:
     """Same-chat unread windows should serialize without duplication."""
 
     async def case() -> None:
@@ -215,7 +215,7 @@ def test_overlapping_inbound_events_do_not_duplicate_cqmsg_context() -> None:
             bus.release_events[1].set()
 
             published = await _consume_published(bus, 2)
-            published_ids = [msg.metadata["cqmsg_message_ids"] for msg in published]
+            published_ids = [msg.metadata["ctx_message_ids"] for msg in published]
             assert published_ids == [["1"], ["2"]]
             assert channel._buffer.get_unconsumed_chat_entries("group:456") == []
         finally:
@@ -297,12 +297,12 @@ def test_different_chats_still_process_concurrently() -> None:
 
             first_published = await _consume_published(bus, 1)
             assert first_published[0].chat_id == "group:789"
-            assert first_published[0].metadata["cqmsg_message_ids"] == ["9"]
+            assert first_published[0].metadata["ctx_message_ids"] == ["9"]
 
             slow_gate.set()
             second_published = await _consume_published(bus, 1)
             assert second_published[0].chat_id == "group:456"
-            assert second_published[0].metadata["cqmsg_message_ids"] == ["1"]
+            assert second_published[0].metadata["ctx_message_ids"] == ["1"]
         finally:
             slow_gate.set()
             await channel.stop()
@@ -375,7 +375,7 @@ def test_session_queue_drops_new_events_when_full(
 
             release_first.set()
             published = await _consume_published(bus, 2)
-            assert [msg.metadata["cqmsg_message_ids"] for msg in published] == [
+            assert [msg.metadata["ctx_message_ids"] for msg in published] == [
                 ["1"],
                 ["2"],
             ]
@@ -421,11 +421,11 @@ def test_session_queue_drop_is_non_blocking_for_other_chats(
 
             first_published = await _consume_published(bus, 1)
             assert first_published[0].chat_id == "group:789"
-            assert first_published[0].metadata["cqmsg_message_ids"] == ["9"]
+            assert first_published[0].metadata["ctx_message_ids"] == ["9"]
 
             release_first.set()
             remaining = await _consume_published(bus, 2)
-            assert [msg.metadata["cqmsg_message_ids"] for msg in remaining] == [
+            assert [msg.metadata["ctx_message_ids"] for msg in remaining] == [
                 ["1"],
                 ["2"],
             ]

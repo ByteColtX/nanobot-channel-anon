@@ -20,8 +20,10 @@ class ForwardNodeEntry:
     sender_card: str = ""
     message_id: str | None = None
     media: list[str] = field(default_factory=list)
+    media_items: list[dict[str, Any]] = field(default_factory=list)
     reply_to_message_id: str | None = None
     segment_types: list[str] = field(default_factory=list)
+    render_segments: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -47,9 +49,11 @@ class MessageEntry:
     sender_nickname: str = ""
     sender_card: str = ""
     media: list[str] = field(default_factory=list)
+    media_items: list[dict[str, Any]] = field(default_factory=list)
     reply_to_message_id: str | None = None
     event_time: int | float | str | None = None
     segment_types: list[str] = field(default_factory=list)
+    render_segments: list[dict[str, str]] = field(default_factory=list)
     forward_refs: list[dict[str, Any]] = field(default_factory=list)
     expanded_forwards: list[ForwardEntry] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)

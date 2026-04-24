@@ -537,16 +537,16 @@ def test_reader_writes_private_message_to_cache_file(
             assert inbound.sender_id == "123"
             assert inbound.content == "\n".join(
                 [
-                    "<CQMSG/1 bot:me n:1>",
+                    "<CTX/1 p:123 bot:me n:1>",
                     "U|me|42|anon-bot|bot",
                     "U|peer|123|123",
                     "M|7000|peer|hello",
-                    "</CQMSG/1>",
+                    "</CTX/1>",
                 ]
             )
             assert inbound.metadata["trigger_reason"] == "private_prob"
-            assert inbound.metadata["cqmsg_message_ids"] == ["7000"]
-            assert inbound.metadata["cqmsg_count"] == 1
+            assert inbound.metadata["ctx_message_ids"] == ["7000"]
+            assert inbound.metadata["ctx_count"] == 1
             assert channel._buffer.get_unconsumed_chat_entries("private:123") == []
         finally:
             await _stop_channel(channel, task, server)
@@ -629,10 +629,10 @@ def test_reader_keeps_forward_placeholder(
             buffered = channel._buffer.get("private:123", "700")
             assert buffered is not None
             assert buffered.expanded_forwards[0].nodes[0].content == "hello"
-            assert inbound.metadata["cqmsg_message_ids"] == ["700"]
+            assert inbound.metadata["ctx_message_ids"] == ["700"]
             assert "M|700|peer|看看[F:f0]" in inbound.content
             assert "F|f0|1|聊天记录" in inbound.content
-            assert "N|f0.0|u0||hello" in inbound.content
+            assert "N|0|u0|hello" in inbound.content
         finally:
             await _stop_channel(channel, task, server)
 
@@ -754,8 +754,8 @@ def test_reader_fetches_forward_content_by_id(
                 == "forwarded"
             )
             assert _find_action(server, "get_forward_msg")["params"] == {"id": "fwd-2"}
-            assert inbound.metadata["cqmsg_message_ids"] == ["701"]
-            assert "N|f0.0|u0||forwarded" in inbound.content
+            assert inbound.metadata["ctx_message_ids"] == ["701"]
+            assert "N|0|u0|forwarded" in inbound.content
         finally:
             await _stop_channel(channel, task, server)
 
@@ -832,9 +832,9 @@ def test_reader_marks_get_forward_msg_failure_unresolved(
             assert expanded["forward_id"] == "fwd-expired"
             assert expanded["unresolved"] is True
             assert expanded["nodes"] == []
-            assert inbound.metadata["cqmsg_message_ids"] == ["702"]
+            assert inbound.metadata["ctx_message_ids"] == ["702"]
             assert "M|702|peer|看看[F:f0]" in inbound.content
-            assert "F|f0|0" in inbound.content
+            assert "F|f0|0|!" in inbound.content
             assert any(
                 "WARNING|Anon get_forward_msg returned failure:" in msg
                 for msg in messages
@@ -924,9 +924,9 @@ def test_reader_marks_get_forward_msg_null_data_unresolved(
             assert expanded["forward_id"] == "fwd-null"
             assert expanded["unresolved"] is True
             assert expanded["nodes"] == []
-            assert inbound.metadata["cqmsg_message_ids"] == ["703"]
+            assert inbound.metadata["ctx_message_ids"] == ["703"]
             assert "M|703|peer|看看[F:f0]" in inbound.content
-            assert "F|f0|0" in inbound.content
+            assert "F|f0|0|!" in inbound.content
             assert any(
                 (
                     "WARNING|Anon get_forward_msg returned failure: "
@@ -1237,7 +1237,7 @@ def test_send_does_not_reply_to_last_inbound_message(
             )
             await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
-            assert inbound.metadata["cqmsg_message_ids"] == ["777"]
+            assert inbound.metadata["ctx_message_ids"] == ["777"]
             await channel.send(
                 OutboundMessage(channel="anon", chat_id="private:123", content="reply")
             )
@@ -1477,10 +1477,10 @@ def test_group_reply_only_triggers_for_bot_message(
             assert inbound.chat_id == "group:2"
             assert inbound.sender_id == "123"
             assert inbound.metadata["trigger_reason"] == "reply"
-            assert inbound.metadata["cqmsg_message_ids"] == ["9100"]
-            assert inbound.metadata["cqmsg_count"] == 1
+            assert inbound.metadata["ctx_message_ids"] == ["9100"]
+            assert inbound.metadata["ctx_count"] == 1
             assert "M|9013|u0|hello" in inbound.content
-            assert "M|9100|u1|>m:9013 收到" in inbound.content
+            assert "M|9100|u1|^9013 收到" in inbound.content
             assert channel._buffer.get_unconsumed_chat_entries("group:2") == []
         finally:
             await _stop_channel(channel, task, server)
@@ -1582,10 +1582,10 @@ def test_group_reply_backfills_evicted_target_via_get_msg(
             await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
 
-            assert inbound.metadata["cqmsg_message_ids"] == ["9100"]
-            assert inbound.metadata["cqmsg_count"] == 1
+            assert inbound.metadata["ctx_message_ids"] == ["9100"]
+            assert inbound.metadata["ctx_count"] == 1
             assert "M|9013|u0|hello" in inbound.content
-            assert "M|9100|u1|>m:9013 收到" in inbound.content
+            assert "M|9100|u1|^9013 收到" in inbound.content
             get_msg_action = _find_action(server, "get_msg")
             assert get_msg_action["params"] == {"message_id": 9013}
         finally:
@@ -1694,8 +1694,8 @@ def test_allowlisted_group_inbound_accepts_matching_group_id(
             assert inbound.sender_id == "123"
             assert inbound.metadata["group_id"] == "2"
             assert inbound.metadata["trigger_reason"] == "group_prob"
-            assert inbound.metadata["cqmsg_message_ids"] == ["9102"]
-            assert "<CQMSG/1 g:2 bot:u0 n:1>" in inbound.content
+            assert inbound.metadata["ctx_message_ids"] == ["9102"]
+            assert "<CTX/1 g:2 bot:u0 n:1>" in inbound.content
             assert "M|9102|u1|hello group" in inbound.content
             assert channel._buffer.get_unconsumed_chat_entries("group:2") == []
         finally:
@@ -1747,7 +1747,7 @@ def test_allowlisted_group_inbound_accepts_matching_sender_id(
             assert inbound.chat_id == "group:2"
             assert inbound.sender_id == "123"
             assert inbound.metadata["group_id"] == "2"
-            assert inbound.metadata["cqmsg_message_ids"] == ["9103"]
+            assert inbound.metadata["ctx_message_ids"] == ["9103"]
             assert channel._buffer.get_unconsumed_chat_entries("group:2") == []
         finally:
             await _stop_channel(channel, task, server)
@@ -1979,7 +1979,7 @@ def test_group_ban_notice_blocks_and_lift_ban_restores_group_inbound(
             await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "group:2"
-            assert inbound.metadata["cqmsg_message_ids"] == ["mute-3"]
+            assert inbound.metadata["ctx_message_ids"] == ["mute-3"]
             assert channel._buffer.get("group:2", "mute-3") is not None
         finally:
             await _stop_channel(channel, task, server)
@@ -2064,7 +2064,7 @@ def test_other_user_group_ban_notice_does_not_block_group_inbound(
             await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "group:2"
-            assert inbound.metadata["cqmsg_message_ids"] == ["mute-4"]
+            assert inbound.metadata["ctx_message_ids"] == ["mute-4"]
         finally:
             await _stop_channel(channel, task, server)
 
@@ -2136,7 +2136,7 @@ def test_expired_muted_group_entry_is_cleared_before_publish(
             await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "group:2"
-            assert inbound.metadata["cqmsg_message_ids"] == ["mute-5"]
+            assert inbound.metadata["ctx_message_ids"] == ["mute-5"]
             assert "2" not in channel._muted_groups
         finally:
             await _stop_channel(channel, task, server)
@@ -2239,7 +2239,7 @@ def test_cold_start_mute_sync_blocks_only_the_target_group(
             )
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "group:3"
-            assert inbound.metadata["cqmsg_message_ids"] == ["mute-6b"]
+            assert inbound.metadata["ctx_message_ids"] == ["mute-6b"]
             assert channel._buffer.get("group:2", "mute-6a") is None
 
             group_2_gate.set()
@@ -2319,7 +2319,7 @@ def test_first_message_in_new_group_triggers_single_lazy_mute_lookup(
             await _wait_for(lambda: channel._inbound_cache_path.exists())
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "group:2"
-            assert inbound.metadata["cqmsg_message_ids"] == ["mute-7"]
+            assert inbound.metadata["ctx_message_ids"] == ["mute-7"]
             assert get_group_shut_list_calls == 1
             assert "2" in channel._known_group_mute_states
         finally:
@@ -2409,8 +2409,8 @@ def test_same_group_waiters_share_one_mute_lookup(
             await _wait_for(lambda: channel._inbound_cache_path.exists())
             first = await _consume_inbound(bus)
             second = await _consume_inbound(bus)
-            assert first.metadata["cqmsg_message_ids"] == ["mute-8a"]
-            assert second.metadata["cqmsg_message_ids"] == ["mute-8b"]
+            assert first.metadata["ctx_message_ids"] == ["mute-8a"]
+            assert second.metadata["ctx_message_ids"] == ["mute-8b"]
             assert get_group_shut_list_calls == 1
         finally:
             await _stop_channel(channel, task, server)
@@ -2458,7 +2458,7 @@ def test_wildcard_allow_from_allows_private_inbound(
             assert snapshot["private:456"][0]["sender_id"] == "456"
             assert inbound.chat_id == "private:456"
             assert inbound.sender_id == "456"
-            assert inbound.metadata["cqmsg_message_ids"] == ["9105"]
+            assert inbound.metadata["ctx_message_ids"] == ["9105"]
             assert channel._buffer.get_unconsumed_chat_entries("private:456") == []
         finally:
             await _stop_channel(channel, task, server)
@@ -2598,7 +2598,7 @@ def test_status_slash_bypasses_private_probability(
             assert inbound.content.strip().lower() == "/status"
             assert inbound.metadata["trigger_reason"] == "slash_status"
             assert inbound.metadata["slash_command"] == "status"
-            assert inbound.metadata["cqmsg_message_ids"] == ["9301"]
+            assert inbound.metadata["ctx_message_ids"] == ["9301"]
             assert channel._buffer.get_unconsumed_chat_entries("private:123") == []
         finally:
             await _stop_channel(channel, task, server)
@@ -2692,7 +2692,7 @@ def test_admin_slash_command_bypasses_private_routing(
             assert metadata["slash_command"] == "restart"
             assert inbound.metadata["trigger_reason"] == "slash_command"
             assert inbound.metadata["slash_command"] == "restart"
-            assert inbound.metadata["cqmsg_message_ids"] == ["9303"]
+            assert inbound.metadata["ctx_message_ids"] == ["9303"]
             assert channel._buffer.get_unconsumed_chat_entries("private:123") == []
             assert channel.config.super_admins == ["123"]
         finally:
@@ -2739,7 +2739,7 @@ def test_statusx_is_treated_as_normal_slash_command(
             assert inbound.content == "/statusx"
             assert inbound.metadata["trigger_reason"] == "slash_command"
             assert inbound.metadata["slash_command"] == "statusx"
-            assert inbound.metadata["cqmsg_message_ids"] == ["9305"]
+            assert inbound.metadata["ctx_message_ids"] == ["9305"]
             assert channel._buffer.get_unconsumed_chat_entries("private:123") == []
         finally:
             await _stop_channel(channel, task, server)
@@ -2747,7 +2747,7 @@ def test_statusx_is_treated_as_normal_slash_command(
     asyncio.run(case())
 
 
-def test_routed_poke_serializes_into_cqmsg(
+def test_routed_poke_serializes_into_ctx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Routed private poke events should publish through CQMSG."""
@@ -2781,16 +2781,13 @@ def test_routed_poke_serializes_into_cqmsg(
             inbound = await _consume_inbound(bus)
             assert inbound.chat_id == "private:123"
             assert inbound.sender_id == "123"
-            assert "<CQMSG/1 bot:me n:1>" in inbound.content
-            assert (
-                "M|notice:poke:1776818315:private:123:42|peer|[notice:poke] 戳了戳你"
-                in inbound.content
-            )
+            assert "<CTX/1 p:123 bot:me n:0>" in inbound.content
+            assert "P|notice:poke:1776818315:private:123:42|peer" in inbound.content
             assert inbound.metadata["trigger_reason"] == "poke"
-            assert inbound.metadata["cqmsg_message_ids"] == [
+            assert inbound.metadata["ctx_message_ids"] == [
                 "notice:poke:1776818315:private:123:42"
             ]
-            assert inbound.metadata["cqmsg_count"] == 1
+            assert inbound.metadata["ctx_count"] == 0
         finally:
             await _stop_channel(channel, task, server)
 
@@ -2838,15 +2835,12 @@ def test_group_poke_accepts_matching_group_id(
             assert inbound.sender_id == "123"
             assert inbound.metadata["group_id"] == "456"
             assert inbound.metadata["trigger_reason"] == "poke"
-            assert inbound.metadata["cqmsg_message_ids"] == [
+            assert inbound.metadata["ctx_message_ids"] == [
                 "notice:poke:1776818315:456:123:42"
             ]
-            assert inbound.metadata["cqmsg_count"] == 1
-            assert "<CQMSG/1 g:456 bot:u0 n:1>" in inbound.content
-            assert (
-                "M|notice:poke:1776818315:456:123:42|u1|[notice:poke] 戳了戳你"
-                in inbound.content
-            )
+            assert inbound.metadata["ctx_count"] == 0
+            assert "<CTX/1 g:456 bot:u0 n:0>" in inbound.content
+            assert "P|notice:poke:1776818315:456:123:42|u1" in inbound.content
         finally:
             await _stop_channel(channel, task, server)
 
@@ -3015,8 +3009,8 @@ def test_group_inbound_attaches_history_only_image_from_unread_window(
             assert inbound.media == [str(history_path)]
             assert "I|i0|history.png" in inbound.content
             assert "M|9401|u1|[i0]" in inbound.content
-            assert "M|9402|u1|看图" in inbound.content
-            assert inbound.metadata["cqmsg_message_ids"] == ["9401", "9402"]
+            assert "M|9402|u1|@u0看图" in inbound.content
+            assert inbound.metadata["ctx_message_ids"] == ["9401", "9402"]
             assert channel._buffer.get_unconsumed_chat_entries("group:456") == []
         finally:
             await _stop_channel(channel, task, server)
@@ -3115,8 +3109,8 @@ def test_group_inbound_attaches_history_and_trigger_images_from_unread_window(
             assert "I|i0|history.png" in inbound.content
             assert "I|i1|trigger.png" in inbound.content
             assert "M|9403|u1|[i0]" in inbound.content
-            assert "M|9404|u1|看这两张[i1]" in inbound.content
-            assert inbound.metadata["cqmsg_message_ids"] == ["9403", "9404"]
+            assert "M|9404|u1|@u0看这两张[i1]" in inbound.content
+            assert inbound.metadata["ctx_message_ids"] == ["9403", "9404"]
             assert channel._buffer.get_unconsumed_chat_entries("group:456") == []
         finally:
             await _stop_channel(channel, task, server)
@@ -3258,7 +3252,7 @@ def test_cached_private_image_inbound_skips_redownload(
             assert buffered is not None
             assert buffered.media == [str(cached_file.resolve())]
             assert inbound.media == [str(cached_file.resolve())]
-            assert inbound.metadata["cqmsg_message_ids"] == ["9203"]
+            assert inbound.metadata["ctx_message_ids"] == ["9203"]
             assert cached_file.read_bytes() == b"cached"
         finally:
             await _stop_channel(channel, task, server)
@@ -3415,8 +3409,9 @@ def test_allowed_private_voice_inbound_downloads_and_transcribes(
                 == "今晚八点开会"
             )
             assert "I|" not in inbound.content
-            assert "[voice]" not in inbound.content
-            assert "M|9301|peer|[transcription: 今晚八点开会]" in inbound.content
+            assert "[transcription:" not in inbound.content
+            assert "V|v0|hello.wav|=今晚八点开会" in inbound.content
+            assert "M|9301|peer|[v0]" in inbound.content
             assert inbound.media == []
             assert (
                 inbound.metadata["media_items"][0]["transcription_text"]
@@ -3589,10 +3584,11 @@ def test_cached_private_voice_inbound_skips_redownload_but_still_transcribes(
                 "transcription_local_file_uri"
                 not in buffered.metadata["media_items"][0]
             )
-            assert "[voice]" not in inbound.content
-            assert "M|9303|peer|[transcription: 已命中缓存]" in inbound.content
+            assert "[transcription:" not in inbound.content
+            assert "V|v0|cached.wav|=已命中缓存" in inbound.content
+            assert "M|9303|peer|[v0]" in inbound.content
             assert inbound.media == []
-            assert inbound.metadata["cqmsg_message_ids"] == ["9303"]
+            assert inbound.metadata["ctx_message_ids"] == ["9303"]
             assert cached_file.read_bytes() == b"cached"
         finally:
             await _stop_channel(channel, task, server)
@@ -3672,7 +3668,8 @@ def test_oversized_private_voice_inbound_keeps_placeholder_only(
             assert buffered.content == "[voice]"
             assert buffered.media == []
             assert "I|" not in inbound.content
-            assert "M|9304|peer|[voice]" in inbound.content
+            assert "V|v0|big.amr" in inbound.content
+            assert "M|9304|peer|[v0]" in inbound.content
             assert not (tmp_path / "media" / "big.amr").exists()
         finally:
             await _stop_channel(channel, task, server)
@@ -3760,7 +3757,8 @@ def test_allowed_private_voice_inbound_transcodes_amr_before_transcription(
             )
             assert not (tmp_path / "media" / "hello.amr").exists()
             assert (tmp_path / "media" / "hello.wav").exists()
-            assert "M|9307|peer|[transcription: 今晚八点开会]" in inbound.content
+            assert "V|v0|hello.wav|=今晚八点开会" in inbound.content
+            assert "M|9307|peer|[v0]" in inbound.content
         finally:
             await _stop_channel(channel, task, server)
 
@@ -3869,7 +3867,8 @@ def test_private_voice_inbound_keeps_placeholder_when_transcoding_fails(
                 "transcription_local_file_uri"
                 not in buffered.metadata["media_items"][0]
             )
-            assert "M|9308|peer|[voice]" in inbound.content
+            assert "V|v0|broken.amr|!" in inbound.content
+            assert "M|9308|peer|[v0]" in inbound.content
         finally:
             await _stop_channel(channel, task, server)
 
@@ -4033,7 +4032,8 @@ def test_private_voice_inbound_keeps_placeholder_when_transcoding_times_out(
             assert buffered is not None
             assert buffered.content == "[voice]"
             assert "transcription_text" not in buffered.metadata["media_items"][0]
-            assert "M|9311|peer|[voice]" in inbound.content
+            assert "V|v0|slow.amr|!" in inbound.content
+            assert "M|9311|peer|[v0]" in inbound.content
             assert not (tmp_path / "media" / "slow.wav").exists()
         finally:
             await _stop_channel(channel, task, server)
@@ -4214,7 +4214,7 @@ def test_private_text_with_video_and_file_inbound_keeps_only_text(
             assert buffered is not None
             assert buffered.content == "前后"
             assert buffered.media == []
-            assert inbound.metadata["cqmsg_message_ids"] == ["9306"]
+            assert inbound.metadata["ctx_message_ids"] == ["9306"]
             assert "[video]" not in inbound.content
             assert "[file]" not in inbound.content
             assert "M|9306|peer|前后" in inbound.content

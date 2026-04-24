@@ -54,6 +54,7 @@ class ParsedMessage:
     text: str = ""
     media: list[str] = field(default_factory=list)
     media_items: list[dict[str, Any]] = field(default_factory=list)
+    render_segments: list[dict[str, str]] = field(default_factory=list)
     mentioned_self: bool = False
     mentioned_all: bool = False
     reply_to_message_id: str | None = None
@@ -144,6 +145,7 @@ def _normalize_message_event(
         "mentioned_all": parsed.mentioned_all,
         "forward_refs": [_forward_ref_metadata(ref) for ref in parsed.forward_refs],
         "media_items": list(parsed.media_items),
+        "render_segments": list(parsed.render_segments),
         "sender_nickname": raw.sender.nickname if raw.sender is not None else "",
         "sender_card": raw.sender.card if raw.sender is not None else "",
         "segment_types": parsed.segment_types,
@@ -218,9 +220,11 @@ def build_message_entry(
         sender_nickname=_display_name(candidate.metadata.get("sender_nickname")),
         sender_card=_display_name(candidate.metadata.get("sender_card")),
         media=list(candidate.media),
+        media_items=list(candidate.metadata.get("media_items") or []),
         reply_to_message_id=candidate.reply_to_message_id,
         event_time=candidate.metadata.get("event_time"),
         segment_types=list(candidate.metadata.get("segment_types") or []),
+        render_segments=list(candidate.metadata.get("render_segments") or []),
         forward_refs=list(candidate.metadata.get("forward_refs") or []),
         expanded_forwards=list(expanded_forwards or []),
         metadata=dict(candidate.metadata),
@@ -281,6 +285,7 @@ async def _process_candidate_voices(
         try:
             result = await voice_processor(item)
         except Exception:
+            item["transcription_status"] = "failed"
             result = None
         replacement: str | None = None
         if isinstance(result, dict):
@@ -297,7 +302,10 @@ async def _process_candidate_voices(
             transcription_text = string_value(result.get("transcription_text"))
             if transcription_text is not None:
                 item["transcription_text"] = transcription_text
+                item["transcription_status"] = "success"
                 replacement = f"[transcription: {transcription_text}]"
+            elif local_file_uri is not None or transcription_local_file_uri is not None:
+                item["transcription_status"] = "failed"
 
         replacements.append(replacement)
 
@@ -479,14 +487,18 @@ def _build_forward_node(node: dict[str, Any]) -> ForwardNodeEntry:
         sender_card=sender_card,
         message_id=normalize_onebot_id(data.get("message_id") or data.get("id")),
         media=parsed.media,
+        media_items=parsed.media_items,
         reply_to_message_id=parsed.reply_to_message_id,
         segment_types=parsed.segment_types,
+        render_segments=parsed.render_segments,
     )
 
 
 def _parse_forward_message_segments(message: Any) -> ParsedMessage:
     text_parts: list[str] = []
     media: list[str] = []
+    media_items: list[dict[str, Any]] = []
+    render_segments: list[dict[str, str]] = []
     reply_to_message_id: str | None = None
     segment_types: list[str] = []
 
@@ -495,7 +507,18 @@ def _parse_forward_message_segments(message: Any) -> ParsedMessage:
         data = segment.data
 
         if segment.type == "text":
-            text_parts.append(string_value(data.get("text")) or "")
+            text = string_value(data.get("text")) or ""
+            text_parts.append(text)
+            if text:
+                render_segments.append({"type": "text", "text": text})
+            continue
+
+        if segment.type == "at":
+            target_id = string_value(data.get("qq") or data.get("user_id"))
+            if target_id == "all":
+                render_segments.append({"type": "mention_all"})
+            elif target_id is not None:
+                render_segments.append({"type": "mention", "user_id": target_id})
             continue
 
         if segment.type == "reply":
@@ -508,6 +531,7 @@ def _parse_forward_message_segments(message: Any) -> ParsedMessage:
         if segment.type == "forward":
             # 转发节点里的嵌套合并转发当前仅保留占位, 不继续递归展开。
             text_parts.append("[forward]")
+            render_segments.append({"type": "forward"})
             continue
 
         placeholder = _MEDIA_PLACEHOLDERS.get(segment.type)
@@ -517,11 +541,24 @@ def _parse_forward_message_segments(message: Any) -> ParsedMessage:
         media_ref = _first_media_ref(data)
         if media_ref is not None:
             media.append(media_ref)
+        media_item = _build_media_item(segment.type, data)
+        if media_item is not None:
+            media_items.append(media_item)
+            if segment.type == "image":
+                render_segments.append(
+                    {"type": "image", "index": str(len(media_items) - 1)}
+                )
+            elif segment.type == "record":
+                render_segments.append(
+                    {"type": "voice", "index": str(len(media_items) - 1)}
+                )
         text_parts.append(placeholder)
 
     return ParsedMessage(
         text="".join(text_parts).strip(),
         media=media,
+        media_items=media_items,
+        render_segments=render_segments,
         reply_to_message_id=reply_to_message_id,
         segment_types=segment_types,
     )
@@ -569,7 +606,7 @@ def _normalize_notice_event(
     return InboundCandidate(
         sender_id=sender_id,
         chat_id=chat_id,
-        content="[notice:poke] 戳了戳你",
+        content="",
         media=[],
         metadata=metadata,
         event_kind="poke",
@@ -640,6 +677,7 @@ def _parse_segments(
 ) -> ParsedMessage:
     text_parts: list[str] = []
     media_items: list[dict[str, Any]] = []
+    render_segments: list[dict[str, str]] = []
     mentioned_self = False
     mentioned_all = False
     reply_to_message_id: str | None = None
@@ -651,15 +689,21 @@ def _parse_segments(
         data = segment.data
 
         if segment.type == "text":
-            text_parts.append(string_value(data.get("text")) or "")
+            text = string_value(data.get("text")) or ""
+            text_parts.append(text)
+            if text:
+                render_segments.append({"type": "text", "text": text})
             continue
 
         if segment.type == "at":
             target_id = string_value(data.get("qq") or data.get("user_id"))
             if target_id == "all":
                 mentioned_all = True
-            elif self_id is not None and target_id == self_id:
-                mentioned_self = True
+                render_segments.append({"type": "mention_all"})
+            elif target_id is not None:
+                if self_id is not None and target_id == self_id:
+                    mentioned_self = True
+                render_segments.append({"type": "mention", "user_id": target_id})
             continue
 
         if segment.type == "reply":
@@ -684,6 +728,7 @@ def _parse_segments(
                 )
             )
             text_parts.append("[forward]")
+            render_segments.append({"type": "forward"})
             continue
 
         placeholder = _MEDIA_PLACEHOLDERS.get(segment.type)
@@ -693,11 +738,20 @@ def _parse_segments(
         media_item = _build_media_item(segment.type, data)
         if media_item is not None:
             media_items.append(media_item)
+            if segment.type == "image":
+                render_segments.append(
+                    {"type": "image", "index": str(len(media_items) - 1)}
+                )
+            elif segment.type == "record":
+                render_segments.append(
+                    {"type": "voice", "index": str(len(media_items) - 1)}
+                )
         text_parts.append(placeholder)
 
     return ParsedMessage(
         text="".join(text_parts).strip(),
         media_items=media_items,
+        render_segments=render_segments,
         mentioned_self=mentioned_self,
         mentioned_all=mentioned_all,
         reply_to_message_id=reply_to_message_id,

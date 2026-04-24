@@ -914,8 +914,8 @@ class AnonChannel(BaseChannel):
             if slash_command is None:
                 content = serialized.text
                 media = list(serialized.media)
-            metadata["cqmsg_message_ids"] = list(serialized.message_ids)
-            metadata["cqmsg_count"] = serialized.count
+            metadata["ctx_message_ids"] = list(serialized.message_ids)
+            metadata["ctx_count"] = serialized.count
 
         if self.supports_streaming:
             metadata["_wants_stream"] = True
