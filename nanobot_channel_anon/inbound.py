@@ -187,6 +187,46 @@ def cache_inbound_candidate(
     _buffer_inbound_message(buffer, candidate, expanded_forwards or [])
 
 
+def build_message_entry(
+    candidate: InboundCandidate,
+    *,
+    expanded_forwards: list[ForwardEntry] | None = None,
+    is_from_self: bool = False,
+) -> MessageEntry | None:
+    """Build a buffered message entry from a normalized candidate."""
+    message_id = normalize_onebot_id(candidate.metadata.get("message_id"))
+    if message_id is None:
+        return None
+    return MessageEntry(
+        message_id=message_id,
+        chat_id=candidate.chat_id,
+        sender_id=candidate.sender_id,
+        sender_name=(
+            _display_name(
+                candidate.metadata.get("sender_card"),
+                candidate.metadata.get("sender_nickname"),
+                candidate.sender_id,
+            )
+            if candidate.event_kind == "group_message"
+            else _display_name(
+                candidate.metadata.get("sender_nickname"),
+                candidate.sender_id,
+            )
+        ),
+        is_from_self=is_from_self,
+        content=candidate.content,
+        sender_nickname=_display_name(candidate.metadata.get("sender_nickname")),
+        sender_card=_display_name(candidate.metadata.get("sender_card")),
+        media=list(candidate.media),
+        reply_to_message_id=candidate.reply_to_message_id,
+        event_time=candidate.metadata.get("event_time"),
+        segment_types=list(candidate.metadata.get("segment_types") or []),
+        forward_refs=list(candidate.metadata.get("forward_refs") or []),
+        expanded_forwards=list(expanded_forwards or []),
+        metadata=dict(candidate.metadata),
+    )
+
+
 async def process_inbound_candidate(
     candidate: InboundCandidate,
     *,
@@ -196,7 +236,7 @@ async def process_inbound_candidate(
     voice_processor: VoiceProcessor | None = None,
 ) -> InboundProcessingResult:
     """补充媒体、forward 语义结果, 供调用方写入最近消息缓存."""
-    _set_reply_target_from_self(candidate, buffer)
+    set_reply_target_from_self(candidate, buffer)
     candidate.media = await _download_candidate_images(candidate, image_downloader)
     await _process_candidate_voices(candidate, voice_processor)
     expanded_forwards = await _expand_candidate_forwards(candidate, forward_resolver)
@@ -324,10 +364,11 @@ async def _expand_candidate_forwards(
     return expanded
 
 
-def _set_reply_target_from_self(
+def set_reply_target_from_self(
     candidate: InboundCandidate,
     buffer: Buffer,
 ) -> None:
+    """Refresh whether the reply target points to a buffered self message."""
     candidate.reply_target_from_self = buffer.is_reply_to_self(
         candidate.chat_id,
         candidate.reply_to_message_id,
@@ -340,39 +381,10 @@ def _buffer_inbound_message(
     candidate: InboundCandidate,
     expanded_forwards: list[ForwardEntry],
 ) -> None:
-    message_id = normalize_onebot_id(candidate.metadata.get("message_id"))
-    if message_id is None:
+    entry = build_message_entry(candidate, expanded_forwards=expanded_forwards)
+    if entry is None:
         return
-    buffer.add(
-        MessageEntry(
-            message_id=message_id,
-            chat_id=candidate.chat_id,
-            sender_id=candidate.sender_id,
-            sender_name=(
-                _display_name(
-                    candidate.metadata.get("sender_card"),
-                    candidate.metadata.get("sender_nickname"),
-                    candidate.sender_id,
-                )
-                if candidate.event_kind == "group_message"
-                else _display_name(
-                    candidate.metadata.get("sender_nickname"),
-                    candidate.sender_id,
-                )
-            ),
-            is_from_self=False,
-            content=candidate.content,
-            sender_nickname=_display_name(candidate.metadata.get("sender_nickname")),
-            sender_card=_display_name(candidate.metadata.get("sender_card")),
-            media=list(candidate.media),
-            reply_to_message_id=candidate.reply_to_message_id,
-            event_time=candidate.metadata.get("event_time"),
-            segment_types=list(candidate.metadata.get("segment_types") or []),
-            forward_refs=list(candidate.metadata.get("forward_refs") or []),
-            expanded_forwards=expanded_forwards,
-            metadata=dict(candidate.metadata),
-        )
-    )
+    buffer.add(entry)
 
 
 def _forward_entry_metadata(entry: ForwardEntry) -> dict[str, Any]:

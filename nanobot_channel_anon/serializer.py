@@ -218,6 +218,9 @@ class _CQMSGBuilder:
         entries: list[MessageEntry],
         self_id: str | None,
         self_nickname: str | None,
+        message_ids: list[str] | None = None,
+        media: list[str] | None = None,
+        count: int | None = None,
     ) -> None:
         self.chat_id = chat_id
         self.entries = entries
@@ -230,8 +233,13 @@ class _CQMSGBuilder:
         self._user_uids: dict[tuple[str, bool], str] = {}
         self._images: list[_ImageRow] = []
         self._image_ids: dict[str, str] = {}
-        self._message_ids = [entry.message_id for entry in entries]
-        self._media = self._collect_media(entries)
+        self._message_ids = (
+            list(message_ids)
+            if message_ids is not None
+            else [entry.message_id for entry in entries]
+        )
+        self._media = list(media) if media is not None else self._collect_media(entries)
+        self._count = len(self._message_ids) if count is None else count
         self._private_peer_id = str(self.target_id) if self.is_private else None
         self._private_index = 0
         self._group_index = 0
@@ -265,7 +273,7 @@ class _CQMSGBuilder:
             text="\n".join(lines),
             message_ids=list(self._message_ids),
             media=list(self._media),
-            count=len(self.entries),
+            count=self._count,
         )
 
     def _header(self, bot_uid: str) -> str:
@@ -525,11 +533,37 @@ def serialize_buffer_chat(
     *,
     self_id: str | None,
     self_nickname: str | None = None,
+    extra_reply_targets: list[MessageEntry] | None = None,
 ) -> SerializedCQMessage | None:
     """Serialize unread buffered chat entries into one CQMSG block."""
-    return serialize_chat_entries(
-        chat_id,
-        buffer.get_unconsumed_chat_entries(chat_id),
+    llm_entries = buffer.get_unconsumed_llm_chat_entries(chat_id)
+    if not llm_entries:
+        return None
+
+    quoted_entries: list[MessageEntry] = []
+    seen_message_ids = {entry.message_id for entry in llm_entries}
+    for reply_target in extra_reply_targets or []:
+        if reply_target.message_id in seen_message_ids:
+            continue
+        quoted_entries.append(reply_target)
+        seen_message_ids.add(reply_target.message_id)
+
+    for entry in llm_entries:
+        if not entry.reply_to_message_id or entry.reply_to_message_id in seen_message_ids:
+            continue
+        reply_target = buffer.get(chat_id, entry.reply_to_message_id)
+        if reply_target is None:
+            continue
+        quoted_entries.append(reply_target)
+        seen_message_ids.add(reply_target.message_id)
+
+    entries = quoted_entries + llm_entries
+    return _CQMSGBuilder(
+        chat_id=chat_id,
+        entries=entries,
         self_id=self_id,
         self_nickname=self_nickname,
-    )
+        message_ids=[entry.message_id for entry in llm_entries],
+        media=_CQMSGBuilder._collect_media(llm_entries),
+        count=len(llm_entries),
+    ).build()

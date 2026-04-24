@@ -107,21 +107,42 @@ class Buffer:
         consumed_count = min(self._consumed_counts.get(chat_id, 0), len(entries))
         return entries[consumed_count:]
 
+    def get_unconsumed_llm_chat_entries(self, chat_id: str) -> list[MessageEntry]:
+        """Return unread non-self messages that should be sent to the LLM."""
+        return [
+            entry
+            for entry in self.get_unconsumed_chat_entries(chat_id)
+            if not entry.is_from_self
+        ]
+
     def mark_chat_entries_consumed(
         self,
         chat_id: str,
         message_ids: Sequence[str],
     ) -> bool:
-        """Advance the consumed cursor when IDs match the unread prefix."""
+        """Advance the consumed cursor when IDs match unread non-self messages."""
         if not message_ids:
             return True
         unread_entries = self.get_unconsumed_chat_entries(chat_id)
-        unread_ids = [entry.message_id for entry in unread_entries[: len(message_ids)]]
         target_ids = list(message_ids)
-        if unread_ids != target_ids:
+        target_index = 0
+        consumed_delta = 0
+
+        for entry in unread_entries:
+            if target_index >= len(target_ids):
+                break
+            consumed_delta += 1
+            if entry.is_from_self:
+                continue
+            if entry.message_id != target_ids[target_index]:
+                return False
+            target_index += 1
+
+        if target_index != len(target_ids):
             return False
+
         self._consumed_counts[chat_id] = min(
-            self._consumed_counts.get(chat_id, 0) + len(target_ids),
+            self._consumed_counts.get(chat_id, 0) + consumed_delta,
             len(self.get_chat_entries(chat_id)),
         )
         return True

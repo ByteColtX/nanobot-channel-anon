@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from nanobot_channel_anon.buffer import Buffer, MessageEntry
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.inbound import (
+    build_message_entry,
     cache_inbound_candidate,
     normalize_inbound_event,
     process_inbound_candidate,
@@ -870,6 +871,11 @@ class AnonChannel(BaseChannel):
             logger.warning("Anon inbound processing failed: {}", exc)
             return
         candidate = processed.candidate
+        reply_targets = await self._collect_reply_targets(candidate)
+        if reply_targets and reply_targets[0].is_from_self:
+            candidate.reply_target_from_self = True
+            candidate.metadata["reply_target_from_self"] = True
+
         slash_command = candidate.metadata.get("slash_command")
         if slash_command is not None:
             candidate.metadata["trigger_reason"] = (
@@ -897,6 +903,7 @@ class AnonChannel(BaseChannel):
             routed.chat_id,
             self_id=self._self_id,
             self_nickname=self._self_nickname,
+            extra_reply_targets=reply_targets,
         )
         metadata = dict(routed.metadata)
 
@@ -1180,6 +1187,112 @@ class AnonChannel(BaseChannel):
             )
             return None
         return response.data
+
+    async def _collect_reply_targets(
+        self,
+        candidate: Any,
+    ) -> list[MessageEntry]:
+        reply_to_message_id = candidate.reply_to_message_id
+        if not reply_to_message_id:
+            return []
+        if (
+            self._buffer.get(candidate.chat_id, reply_to_message_id)
+            is not None
+        ):
+            return []
+
+        reply_entry = await self._fetch_reply_target_message_entry(
+            candidate.chat_id,
+            reply_to_message_id,
+        )
+        if reply_entry is None:
+            return []
+        return [reply_entry]
+
+    async def _fetch_reply_target_message_entry(
+        self,
+        chat_id: str,
+        message_id: str,
+    ) -> MessageEntry | None:
+        try:
+            response = await self._send_api_request(
+                "get_msg",
+                {"message_id": int(message_id)},
+            )
+        except Exception as exc:
+            logger.warning("Anon get_msg failed for {}: {}", message_id, exc)
+            return None
+
+        if response.status == "failed" or str(response.retcode or "") not in {"", "0"}:
+            logger.warning(
+                "Anon get_msg returned failure for {}: status={} retcode={}",
+                message_id,
+                response.status,
+                response.retcode,
+            )
+            return None
+
+        payload = response.data if isinstance(response.data, dict) else None
+        if payload is None:
+            logger.warning("Anon get_msg returned invalid data for {}", message_id)
+            return None
+
+        message_type = str(payload.get("message_type") or "")
+        group_id = normalize_onebot_id(payload.get("group_id"))
+        raw_sender = payload.get("sender")
+        sender = raw_sender if isinstance(raw_sender, dict) else {}
+        sender_id = normalize_onebot_id(
+            payload.get("user_id") or sender.get("user_id")
+        )
+        fetched_message_id = normalize_onebot_id(payload.get("message_id"))
+        if fetched_message_id is None or sender_id is None:
+            logger.warning("Anon get_msg missing ids for {}", message_id)
+            return None
+
+        if message_type == "group":
+            if group_id is None:
+                logger.warning("Anon get_msg missing group_id for {}", message_id)
+                return None
+            fetched_chat_id = build_group_chat_id(group_id)
+            event_kind = "group_message"
+        else:
+            fetched_chat_id = build_private_chat_id(sender_id)
+            event_kind = "private_message"
+
+        if fetched_chat_id != chat_id:
+            logger.warning(
+                "Anon get_msg returned mismatched chat for {}: expected={} actual={}",
+                message_id,
+                chat_id,
+                fetched_chat_id,
+            )
+            return None
+
+        candidate = normalize_inbound_event(
+            OneBotRawEvent.model_validate(
+                {
+                    "post_type": "message",
+                    "message_type": message_type or "private",
+                    "message_id": fetched_message_id,
+                    "group_id": group_id,
+                    "user_id": sender_id,
+                    "message": payload.get("message"),
+                    "raw_message": str(payload.get("message") or ""),
+                    "sender": sender,
+                    "time": payload.get("time"),
+                }
+            ),
+            config=self.config,
+            self_id=self._self_id,
+        )
+        if candidate is None:
+            logger.warning("Anon get_msg could not normalize message {}", message_id)
+            return None
+        candidate.event_kind = event_kind
+        return build_message_entry(
+            candidate,
+            is_from_self=sender_id == self._self_id,
+        )
 
     async def _download_inbound_image(self, media_item: dict[str, Any]) -> str | None:
         local_file = await self._download_inbound_media(media_item)
