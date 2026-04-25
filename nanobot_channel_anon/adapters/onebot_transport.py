@@ -119,10 +119,12 @@ class OneBotTransport:
         self._running = False
         self._connection: OneBotConnection | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._dispatcher_task: asyncio.Task[None] | None = None
         self._pending_responses: dict[str, asyncio.Future[OneBotRawEvent]] = {}
         self._inbound_handler: (
             Callable[[NormalizedMessage], Awaitable[None]] | None
         ) = None
+        self._inbound_queue: asyncio.Queue[NormalizedMessage | None] = asyncio.Queue()
         self.sent_requests: list[OneBotAPIRequest] = []
         self._startup_group_ids: set[str] = set()
 
@@ -149,10 +151,11 @@ class OneBotTransport:
             logger.info("Anon WebSocket connected: {}", self.config.ws_url)
             self._running = True
             self._reader_task = asyncio.create_task(self._read_loop())
+            self._dispatcher_task = asyncio.create_task(self._dispatch_inbound_loop())
             await self._run_startup_sync()
             stop_waiter = asyncio.create_task(self._stop_event.wait())
             done, pending = await asyncio.wait(
-                [self._reader_task, stop_waiter],
+                [self._reader_task, self._dispatcher_task, stop_waiter],
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
@@ -173,11 +176,15 @@ class OneBotTransport:
         self._stop_event.set()
         await self._shutdown_reader()
 
-    async def send_requests(self, requests: Sequence[OneBotAPIRequest]) -> None:
+    async def send_requests(
+        self,
+        requests: Sequence[OneBotAPIRequest],
+    ) -> list[OneBotRawEvent]:
         """发送一批 OneBot 动作请求."""
         if self._connection is None:
             raise RuntimeError("transport is not running")
 
+        responses: list[OneBotRawEvent] = []
         for request in requests:
             outbound = request.model_copy(
                 update={"echo": request.echo or self._next_echo()}
@@ -199,6 +206,8 @@ class OneBotTransport:
             finally:
                 self._pending_responses.pop(outbound.echo or "", None)
             self._raise_for_failed_response(outbound, response)
+            responses.append(response)
+        return responses
 
     async def _read_loop(self) -> None:
         """持续读取 OneBot 事件与响应."""
@@ -229,13 +238,27 @@ class OneBotTransport:
                         message.sender_id,
                     )
                     continue
-                await self._inbound_handler(message)
+                await self._inbound_queue.put(message)
         except EOFError:
             self._stop_event.set()
         finally:
+            await self._inbound_queue.put(None)
             for future in self._pending_responses.values():
                 if not future.done():
                     future.cancel()
+
+    async def _dispatch_inbound_loop(self) -> None:
+        """串行消费标准化入站消息, 避免阻塞读循环."""
+        try:
+            while not self._stop_event.is_set():
+                message = await self._inbound_queue.get()
+                if message is None:
+                    break
+                if self._inbound_handler is None:
+                    continue
+                await self._inbound_handler(message)
+        except EOFError:
+            self._stop_event.set()
 
     def _update_state(self, raw: OneBotRawEvent) -> None:
         """按事件更新最小运行时状态."""
@@ -263,11 +286,46 @@ class OneBotTransport:
             with contextlib.suppress(asyncio.CancelledError, EOFError):
                 await self._reader_task
             self._reader_task = None
+        if self._dispatcher_task is not None:
+            await self._inbound_queue.put(None)
+            with contextlib.suppress(asyncio.CancelledError, EOFError):
+                await self._dispatcher_task
+            self._dispatcher_task = None
 
     async def _run_startup_sync(self) -> None:
         """执行启动后的 bot 信息与群禁言状态同步."""
         await self._fetch_self_identity()
         await self._refresh_group_mute_states()
+
+    async def get_message(self, message_id: str) -> OneBotRawEvent | None:
+        """按 message_id 拉取一条原始 OneBot 消息响应."""
+        try:
+            numeric_message_id = int(message_id)
+        except ValueError:
+            return None
+        response = await self._send_api_request(
+            "get_msg",
+            {"message_id": numeric_message_id},
+        )
+        if response.status == "failed" or str(response.retcode or "") not in {"", "0"}:
+            return None
+        payload = response.data if isinstance(response.data, dict) else None
+        if payload is None:
+            return None
+        return OneBotRawEvent.model_validate(
+            {
+                "post_type": "message",
+                "message_type": payload.get("message_type") or "private",
+                "message_id": payload.get("message_id"),
+                "group_id": payload.get("group_id"),
+                "user_id": payload.get("user_id"),
+                "message": payload.get("message"),
+                "raw_message": str(payload.get("message") or ""),
+                "sender": payload.get("sender"),
+                "self_id": self.state.self_id,
+                "time": payload.get("time"),
+            }
+        )
 
     async def _send_api_request(
         self,

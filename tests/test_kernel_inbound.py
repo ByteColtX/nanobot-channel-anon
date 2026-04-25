@@ -17,7 +17,7 @@ from nanobot_channel_anon.adapters.onebot_transport import OneBotTransport
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.domain import ConversationRef, NormalizedMessage
 from nanobot_channel_anon.kernel import Kernel
-from nanobot_channel_anon.onebot import OneBotAPIRequest
+from nanobot_channel_anon.onebot import OneBotAPIRequest, OneBotRawEvent
 
 
 class FakeConnection:
@@ -56,6 +56,8 @@ class RecordingTransport:
     def __init__(self) -> None:
         """初始化请求记录器."""
         self.requests: list[list[dict[str, object]]] = []
+        self.fetched_messages: dict[str, OneBotRawEvent] = {}
+        self.get_message_calls: list[str] = []
 
     async def start(self) -> None:
         """满足内核接口, 无需额外行为."""
@@ -63,11 +65,17 @@ class RecordingTransport:
     async def stop(self) -> None:
         """满足内核接口, 无需额外行为."""
 
-    async def send_requests(self, requests: list[BaseModel]) -> None:
+    async def send_requests(self, requests: list[BaseModel]) -> list[OneBotRawEvent]:
         """记录一次 OneBot 请求批次."""
         self.requests.append(
             [request.model_dump(exclude_none=False) for request in requests]
         )
+        return []
+
+    async def get_message(self, message_id: str) -> OneBotRawEvent | None:
+        """按消息 ID 返回预置的回查结果."""
+        self.get_message_calls.append(message_id)
+        return self.fetched_messages.get(message_id)
 
 
 def _config(**overrides: object) -> AnonConfig:
@@ -327,6 +335,58 @@ def test_transport_send_requests_raises_on_failed_echo_response() -> None:
     asyncio.run(case())
 
 
+def test_transport_get_message_returns_normalized_raw_event() -> None:
+    """get_message() 应把 get_msg 响应转换为可映射的原始消息事件."""
+
+    async def case() -> None:
+        connection = FakeConnection()
+
+        async def connect() -> FakeConnection:
+            return connection
+
+        transport = OneBotTransport(config=_config(), connect=connect)
+        task = asyncio.create_task(transport.start())
+        await _complete_startup_sync(connection)
+
+        fetch_task = asyncio.create_task(transport.get_message("9001"))
+        await asyncio.sleep(0)
+
+        request = connection.sent_json[-1]
+        assert request["action"] == "get_msg"
+        assert request["params"] == {"message_id": 9001}
+        echo = request["echo"]
+        await connection.push_event(
+            {
+                "echo": echo,
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "message_type": "group",
+                    "message_id": 9001,
+                    "group_id": 456,
+                    "user_id": 42,
+                    "message": [{"type": "text", "data": {"text": "hello"}}],
+                    "sender": {"user_id": 42, "nickname": "Bot"},
+                    "time": 1776818315,
+                },
+            }
+        )
+        raw = await asyncio.wait_for(fetch_task, timeout=1.0)
+
+        assert raw is not None
+        assert raw.post_type == "message"
+        assert raw.message_type == "group"
+        assert raw.message_id == 9001
+        assert raw.group_id == 456
+        assert raw.user_id == 42
+        assert raw.self_id == "42"
+
+        await transport.stop()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(case())
+
+
 def test_transport_send_requests_times_out_without_echo_response() -> None:
     """真实传输层出站请求等待 echo 响应时应有超时上界."""
 
@@ -445,6 +505,81 @@ def test_transport_startup_sync_scans_all_groups_when_allow_all_enabled() -> Non
         assert "Anon mute sync marked group as muted: group_id=456" in log_output
         assert "Anon mute sync marked group as muted: group_id=999" in log_output
         assert "Anon mute sync completed: scanned_groups=2 muted_groups=2" in log_output
+
+    asyncio.run(case())
+
+
+def test_transport_group_reply_backfill_does_not_deadlock_reader_loop() -> None:
+    """读循环中的 reply 回查应通过独立分发协程完成, 不阻塞 get_msg 响应."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        state = OneBotStateAdapter()
+        connection = FakeConnection()
+
+        async def connect() -> FakeConnection:
+            return connection
+
+        transport = OneBotTransport(
+            config=_config(allow_from=["group:456"], trigger_on_at=False),
+            mapper=OneBotMapper(),
+            state=state,
+            connect=connect,
+        )
+        kernel = Kernel(
+            config=_config(allow_from=["group:456"], trigger_on_at=False),
+            bus=bus,
+            transport=transport,
+            state=state,
+        )
+
+        task = asyncio.create_task(kernel.start())
+        await _complete_startup_sync(connection)
+        await connection.push_event(
+            {
+                "self_id": 42,
+                "post_type": "message",
+                "message_type": "group",
+                "message_id": 1002,
+                "group_id": 456,
+                "user_id": 123,
+                "message": [
+                    {"type": "reply", "data": {"id": "9001"}},
+                    {"type": "text", "data": {"text": " hello after restart "}},
+                ],
+                "sender": {"user_id": 123, "nickname": "Alice"},
+                "time": 1776818316,
+            }
+        )
+        get_msg_request = await _wait_for_sent_action(connection, 2, "get_msg")
+        echo = get_msg_request["echo"]
+        assert isinstance(echo, str)
+        await connection.push_event(
+            {
+                "echo": echo,
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "message_type": "group",
+                    "message_id": 9001,
+                    "group_id": 456,
+                    "user_id": 42,
+                    "message": [{"type": "text", "data": {"text": "earlier reply"}}],
+                    "sender": {"user_id": 42, "nickname": "AnonBot"},
+                    "time": 1776818315,
+                },
+            }
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        await kernel.stop()
+        await asyncio.wait_for(task, timeout=1.0)
+
+        assert inbound.metadata["trigger_reason"] == "reply_to_self"
+        assert inbound.metadata["message"]["reply_to_self"] is True
+        assert inbound.metadata["ctx_message_ids"] == ["1002"]
+        assert "M|9001|u0|earlier reply" in inbound.content
+        assert "M|1002|u1|^9001  hello after restart" in inbound.content
 
     asyncio.run(case())
 
@@ -670,6 +805,56 @@ def test_kernel_marks_reply_to_self_from_context_before_policy() -> None:
         assert inbound.metadata["message"]["reply_to_self"] is True
         assert "M|assistant-1|u0|earlier reply" in inbound.content
         assert "M|user-1|u1|^assistant-1 got it" in inbound.content
+
+    asyncio.run(case())
+
+
+def test_kernel_backfills_missing_reply_target_via_get_msg() -> None:
+    """本地缺失 reply target 时应通过 get_msg 回补并按 reply_to_self 触发."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        transport = RecordingTransport()
+        transport.fetched_messages["9001"] = OneBotRawEvent.model_validate(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "message_id": 9001,
+                "group_id": 456,
+                "user_id": 42,
+                "self_id": 42,
+                "message": [{"type": "text", "data": {"text": "earlier reply"}}],
+                "sender": {"user_id": 42, "nickname": "Bot"},
+                "time": 1776818315,
+            }
+        )
+        kernel = Kernel(
+            config=_config(allow_from=["group:456"], trigger_on_at=False),
+            bus=bus,
+            transport=transport,
+        )
+        kernel.state.set_self_profile(user_id="42", nickname="Bot")
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="user-1",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="123",
+                sender_name="Alice",
+                content="got it",
+                reply_to_message_id="9001",
+            )
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert transport.get_message_calls == ["9001"]
+        assert inbound.metadata["trigger_reason"] == "reply_to_self"
+        assert inbound.metadata["message"]["reply_to_self"] is True
+        assert inbound.metadata["ctx_message_ids"] == ["user-1"]
+        assert inbound.metadata["ctx_count"] == 1
+        assert "M|9001|u0|earlier reply" in inbound.content
+        assert "M|user-1|u1|^9001 got it" in inbound.content
 
     asyncio.run(case())
 

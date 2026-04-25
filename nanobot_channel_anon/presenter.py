@@ -59,21 +59,42 @@ class ContextPresenter:
         max_ctx_length: int = 300,
         media_max_size_bytes: int = 50 * 1024 * 1024,
         limit: int | None = None,
+        extra_messages: list[NormalizedMessage] | None = None,
     ) -> PresentedConversation:
         """渲染最近未消费窗口为 CTX/1."""
         unread_messages = store.unconsumed_window(conversation, limit=limit)
+        resolved_extra_messages = [] if extra_messages is None else list(extra_messages)
         if not unread_messages:
-            messages = store.recent_window(conversation, limit=limit)
+            messages = self._merge_messages_in_store_order(
+                store,
+                conversation,
+                resolved_extra_messages,
+                [],
+            )
             message_ids: list[str] = []
             unread_count = 0
         else:
-            unread_message_ids = {message.message_id for message in unread_messages}
-            quoted_messages = self._collect_reply_targets(store, unread_messages)
-            messages = [*quoted_messages, *unread_messages]
+            unread_messages_for_display = [
+                message for message in unread_messages if not message.from_self
+            ]
+            unread_message_ids = {
+                message.message_id for message in unread_messages_for_display
+            }
+            quoted_messages = self._collect_reply_targets(
+                store,
+                unread_messages_for_display,
+                extra_messages=resolved_extra_messages,
+            )
+            messages = self._merge_messages_in_store_order(
+                store,
+                conversation,
+                quoted_messages,
+                unread_messages_for_display,
+            )
             message_ids = [
                 message.message_id
-                for message in unread_messages
-                if message.message_type != "poke" and not message.from_self
+                for message in unread_messages_for_display
+                if message.message_type != "poke"
             ]
             unread_count = len(message_ids)
             if unread_count == 0 and any(
@@ -99,24 +120,59 @@ class ContextPresenter:
     def _collect_reply_targets(
         store: ContextStore,
         unread_messages: list[NormalizedMessage],
+        *,
+        extra_messages: list[NormalizedMessage],
     ) -> list[NormalizedMessage]:
         """补齐未消费窗口引用到的回复目标消息."""
         seen_message_ids = {message.message_id for message in unread_messages}
+        extra_by_id = {message.message_id: message for message in extra_messages}
         quoted_messages: list[NormalizedMessage] = []
         for message in unread_messages:
             if message.reply_to_message_id is None:
                 continue
             if message.reply_to_message_id in seen_message_ids:
                 continue
-            reply_target = store.get_message(
-                message.conversation,
-                message.reply_to_message_id,
-            )
+            reply_target = extra_by_id.get(message.reply_to_message_id)
+            if reply_target is None:
+                reply_target = store.get_message(
+                    message.conversation,
+                    message.reply_to_message_id,
+                )
             if reply_target is None:
                 continue
             quoted_messages.append(reply_target)
             seen_message_ids.add(reply_target.message_id)
         return quoted_messages
+
+    @staticmethod
+    def _merge_messages_in_store_order(
+        store: ContextStore,
+        conversation: ConversationRef,
+        quoted_messages: list[NormalizedMessage],
+        unread_messages: list[NormalizedMessage],
+    ) -> list[NormalizedMessage]:
+        """按上下文存储顺序合并消息, 并为缓存外引用目标补稳定插入位."""
+        selected_by_id = {
+            message.message_id: message
+            for message in [*quoted_messages, *unread_messages]
+        }
+        ordered_messages = [
+            selected_by_id[message.message_id]
+            for message in store.recent_window(conversation)
+            if message.message_id in selected_by_id
+        ]
+        present_ids = {message.message_id for message in ordered_messages}
+        missing_quoted = [
+            message
+            for message in quoted_messages
+            if message.message_id not in present_ids
+        ]
+        if not missing_quoted:
+            return ordered_messages
+
+        for quoted_message in reversed(missing_quoted):
+            ordered_messages.insert(0, quoted_message)
+        return ordered_messages
 
 
 class _CTXBuilder:

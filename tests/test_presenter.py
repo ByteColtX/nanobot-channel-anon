@@ -98,8 +98,77 @@ def test_present_recent_window_includes_reply_target_context() -> None:
 
     assert "M|m1|u1|原消息" in rendered.text
     assert "M|m2|u2|^m1 回复一下" in rendered.text
+    assert rendered.text.index("M|m1|u1|原消息") < rendered.text.index(
+        "M|m2|u2|^m1 回复一下"
+    )
     assert rendered.metadata["message_ids"] == ["m2"]
     assert rendered.metadata["count"] == 1
+
+
+def test_present_recent_window_frontloads_uncached_reply_target() -> None:
+    """Extra reply targets fetched outside the store should render first."""
+    store = ContextStore(max_messages_per_conversation=5)
+    store.append(
+        _message(
+            "m2",
+            sender_id="456",
+            sender_name="Bob",
+            content="回复一下",
+            reply_to_message_id="m1",
+        )
+    )
+
+    rendered = ContextPresenter().present_recent_window(
+        store,
+        _conversation(),
+        self_id="bot",
+        extra_messages=[
+            _message(
+                "m1",
+                sender_id="bot",
+                sender_name="Bot",
+                content="原消息",
+                from_self=True,
+            )
+        ],
+    )
+
+    message_rows = [
+        line for line in rendered.text.splitlines() if line.startswith("M|")
+    ]
+    assert message_rows[0] == "M|m1|u0|原消息"
+    assert message_rows[1] == "M|m2|u1|^m1 回复一下"
+    assert rendered.metadata["message_ids"] == ["m2"]
+    assert rendered.metadata["count"] == 1
+
+
+def test_present_recent_window_excludes_unread_assistant_messages() -> None:
+    """Incremental unread windows should not include assistant self-messages."""
+    store = ContextStore(max_messages_per_conversation=5)
+    store.append(
+        _message(
+            "m1",
+            sender_id="bot",
+            sender_name="Bot",
+            content="在呀",
+            from_self=True,
+        )
+    )
+    store.append(_message("m2", sender_id="123", sender_name="Alice", content="1"))
+    store.append(_message("m3", sender_id="123", sender_name="Alice", content="2"))
+
+    rendered = ContextPresenter().present_recent_window(
+        store,
+        _conversation(),
+        self_id="bot",
+    )
+
+    message_rows = [
+        line for line in rendered.text.splitlines() if line.startswith("M|")
+    ]
+    assert message_rows == ["M|m2|u1|1", "M|m3|u1|2"]
+    assert rendered.metadata["message_ids"] == ["m2", "m3"]
+    assert rendered.metadata["count"] == 2
 
 
 def test_present_recent_window_truncates_single_message_from_middle() -> None:

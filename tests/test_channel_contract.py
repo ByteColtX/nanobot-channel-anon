@@ -13,6 +13,7 @@ from nanobot_channel_anon.adapters.onebot_transport import OneBotTransport
 from nanobot_channel_anon.channel import AnonChannel
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.kernel import Kernel
+from nanobot_channel_anon.onebot import OneBotRawEvent
 
 
 class FakeTransport:
@@ -37,11 +38,12 @@ class FakeTransport:
         self.stop_calls += 1
         self.stop_requested.set()
 
-    async def send_requests(self, requests: list[BaseModel]) -> None:
+    async def send_requests(self, requests: list[BaseModel]) -> list[OneBotRawEvent]:
         """记录一次新的协议请求批次."""
         self.sent_batches.append(
             [request.model_dump(exclude_none=False) for request in requests]
         )
+        return []
 
 
 def _make_channel(
