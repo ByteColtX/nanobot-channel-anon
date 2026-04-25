@@ -15,7 +15,7 @@ from nanobot_channel_anon.adapters.onebot_mapper import OneBotMapper
 from nanobot_channel_anon.adapters.onebot_state import OneBotStateAdapter
 from nanobot_channel_anon.adapters.onebot_transport import OneBotTransport
 from nanobot_channel_anon.config import AnonConfig
-from nanobot_channel_anon.domain import ConversationRef, NormalizedMessage
+from nanobot_channel_anon.domain import Attachment, ConversationRef, NormalizedMessage
 from nanobot_channel_anon.kernel import Kernel
 from nanobot_channel_anon.onebot import OneBotAPIRequest, OneBotRawEvent
 
@@ -76,6 +76,20 @@ class RecordingTransport:
         """按消息 ID 返回预置的回查结果."""
         self.get_message_calls.append(message_id)
         return self.fetched_messages.get(message_id)
+
+
+class FakeInboundMediaEnricher:
+    """测试用入站媒体增强器."""
+
+    def __init__(self, enriched_message: NormalizedMessage | None = None) -> None:
+        """保存预置增强结果."""
+        self.enriched_message = enriched_message
+        self.calls: list[str] = []
+
+    async def enrich(self, message: NormalizedMessage) -> NormalizedMessage:
+        """记录调用并返回增强结果."""
+        self.calls.append(message.message_id)
+        return self.enriched_message or message
 
 
 def _config(**overrides: object) -> AnonConfig:
@@ -975,6 +989,116 @@ def test_kernel_treats_unknown_slash_command_as_normal_message() -> None:
                 message.message_id,
             )
             == message
+        )
+
+    asyncio.run(case())
+
+
+def test_kernel_publishes_enriched_image_and_voice_media_refs() -> None:
+    """增强后的图片和语音应作为结构化 media 传给上游."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        enriched_message = NormalizedMessage(
+            message_id="user-media",
+            conversation=ConversationRef(kind="group", id="456"),
+            sender_id="123",
+            sender_name="Alice",
+            content="看图[image]听一下[voice]",
+            attachments=[
+                Attachment(
+                    kind="image",
+                    url="https://example.com/a.png",
+                    name="a.png",
+                    metadata={
+                        "file_size": "123",
+                        "local_path": "/tmp/a-local.png",
+                    },
+                ),
+                Attachment(
+                    kind="voice",
+                    url="https://example.com/voice.amr",
+                    name="voice.amr",
+                    metadata={
+                        "local_file_uri": "file:///tmp/voice.amr",
+                        "transcription_input_local_file_uri": "file:///tmp/voice.wav",
+                        "transcription_status": "success",
+                        "transcription_text": "你好",
+                    },
+                ),
+            ],
+            metadata={
+                "render_segments": [
+                    {"type": "text", "text": "看图"},
+                    {"type": "image"},
+                    {"type": "text", "text": "听一下"},
+                    {"type": "voice"},
+                ]
+            },
+        )
+        enricher = FakeInboundMediaEnricher(enriched_message)
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=RecordingTransport(),
+            inbound_media_enricher=enricher,
+        )
+
+        await kernel.handle_inbound(
+            _group_message(content="placeholder", message_id="user-media")
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert enricher.calls == ["user-media"]
+        assert inbound.media == ["/tmp/a-local.png", "file:///tmp/voice.wav"]
+        assert "I|i0|a-local.png" in inbound.content
+        assert "V|v0|voice.wav|=你好" in inbound.content
+
+    asyncio.run(case())
+
+
+def test_kernel_suppresses_unsupported_media_only_messages() -> None:
+    """纯视频或文件消息应在内核层被抑制, 不进入总线."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        enriched_message = NormalizedMessage(
+            message_id="video-only",
+            conversation=ConversationRef(kind="group", id="456"),
+            sender_id="123",
+            sender_name="Alice",
+            content="",
+            metadata={"drop_reason": "unsupported_media_only"},
+        )
+        enricher = FakeInboundMediaEnricher(enriched_message)
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=RecordingTransport(),
+            inbound_media_enricher=enricher,
+        )
+
+        await kernel.handle_inbound(
+            _group_message(content="[video]", message_id="video-only")
+        )
+
+        assert enricher.calls == ["video-only"]
+        assert bus.inbound_size == 0
+        assert (
+            kernel.context_store.get_message(
+                ConversationRef(kind="group", id="456"),
+                "video-only",
+            )
+            is None
         )
 
     asyncio.run(case())

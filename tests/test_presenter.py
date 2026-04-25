@@ -227,6 +227,40 @@ def test_present_recent_window_keeps_oversized_image_as_placeholder() -> None:
     assert rendered.media == []
 
 
+def test_present_recent_window_prefers_local_image_media_ref() -> None:
+    """增强后的图片应优先把本地路径暴露给上游 media."""
+    store = ContextStore(max_messages_per_conversation=5)
+    store.append(
+        _message(
+            "m-local-image",
+            sender_id="123",
+            sender_name="Alice",
+            content="看图[image]",
+            attachments=[
+                Attachment(
+                    kind="image",
+                    url="https://example.com/a.png",
+                    name="a.png",
+                    metadata={
+                        "file_size": "123",
+                        "local_path": "/tmp/a-local.png",
+                    },
+                )
+            ],
+        )
+    )
+
+    rendered = ContextPresenter().present_recent_window(
+        store,
+        _conversation(),
+        self_id="bot",
+    )
+
+    assert "I|i0|a-local.png" in rendered.text
+    assert "M|m-local-image|u1|看图[i0]" in rendered.text
+    assert rendered.media == [{"kind": "image", "url": "/tmp/a-local.png"}]
+
+
 def test_present_recent_window_collects_allowed_image_media_once() -> None:
     """Allowed images should produce CTX image rows and deduped media refs."""
     store = ContextStore(max_messages_per_conversation=5)
@@ -273,6 +307,75 @@ def test_present_recent_window_collects_allowed_image_media_once() -> None:
     assert "M|m1|u1|先看[i0]" in rendered.text
     assert "M|m2|u1|再看[i0]" in rendered.text
     assert rendered.media == [{"kind": "image", "url": "https://example.com/a.png"}]
+
+
+def test_present_recent_window_renders_voice_row_with_transcription() -> None:
+    """增强后的语音应输出旧版 V 行与结构化 voice media."""
+    store = ContextStore(max_messages_per_conversation=5)
+    store.append(
+        _message(
+            "m-voice",
+            sender_id="123",
+            sender_name="Alice",
+            content="听一下[voice]",
+            attachments=[
+                Attachment(
+                    kind="voice",
+                    url="https://example.com/voice.amr",
+                    name="voice.amr",
+                    metadata={
+                        "local_file_uri": "file:///tmp/voice.amr",
+                        "transcription_input_local_file_uri": "file:///tmp/voice.wav",
+                        "transcription_status": "success",
+                        "transcription_text": "你好世界",
+                    },
+                )
+            ],
+        )
+    )
+
+    rendered = ContextPresenter().present_recent_window(
+        store,
+        _conversation(),
+        self_id="bot",
+    )
+
+    assert "V|v0|voice.wav|=你好世界" in rendered.text
+    assert "M|m-voice|u1|听一下[v0]" in rendered.text
+    assert rendered.media == [{"kind": "voice", "url": "file:///tmp/voice.wav"}]
+
+
+def test_present_recent_window_renders_voice_row_failure_marker() -> None:
+    """转写失败的语音应输出失败标记而不是 transcript."""
+    store = ContextStore(max_messages_per_conversation=5)
+    store.append(
+        _message(
+            "m-voice-fail",
+            sender_id="123",
+            sender_name="Alice",
+            content="听一下[voice]",
+            attachments=[
+                Attachment(
+                    kind="voice",
+                    url="https://example.com/voice.amr",
+                    name="voice.amr",
+                    metadata={
+                        "local_file_uri": "file:///tmp/voice.amr",
+                        "transcription_status": "failed",
+                    },
+                )
+            ],
+        )
+    )
+
+    rendered = ContextPresenter().present_recent_window(
+        store,
+        _conversation(),
+        self_id="bot",
+    )
+
+    assert "V|v0|voice.amr|!" in rendered.text
+    assert rendered.media == [{"kind": "voice", "url": "file:///tmp/voice.amr"}]
 
 
 def test_present_recent_window_renders_poke_as_event_row() -> None:

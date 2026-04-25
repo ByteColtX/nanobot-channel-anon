@@ -70,6 +70,15 @@ class OutboundMediaUploader(Protocol):
         ...
 
 
+@runtime_checkable
+class InboundMediaEnricher(Protocol):
+    """支持入站媒体增强的运行时扩展."""
+
+    async def enrich(self, message: NormalizedMessage) -> NormalizedMessage:
+        """增强标准化入站消息中的附件信息."""
+        ...
+
+
 class Kernel:
     """频道主运行时编排器."""
 
@@ -84,6 +93,7 @@ class Kernel:
         context_store: ContextStore | None = None,
         policy: PolicyEngine | None = None,
         presenter: ContextPresenter | None = None,
+        inbound_media_enricher: InboundMediaEnricher | None = None,
     ) -> None:
         """初始化内核并保存依赖."""
         self.config = config
@@ -100,6 +110,7 @@ class Kernel:
         )
         self.policy = policy or PolicyEngine(config)
         self.presenter = presenter or ContextPresenter()
+        self.inbound_media_enricher = inbound_media_enricher
         self._running = False
 
         binder = getattr(self.transport, "set_inbound_handler", None)
@@ -133,6 +144,8 @@ class Kernel:
     async def handle_inbound(self, message: NormalizedMessage) -> None:
         """处理适配层产出的标准化入站消息."""
         message, reply_target = await self._hydrate_message(message)
+        if self.inbound_media_enricher is not None:
+            message = await self.inbound_media_enricher.enrich(message)
 
         if message.from_self:
             await self.remember_message(message)
@@ -143,6 +156,8 @@ class Kernel:
         if self.policy.should_passthrough_slash_command(message):
             self._update_member_profile(message)
             await self._publish_passthrough_slash_command(message)
+            return
+        if self._should_suppress_message(message):
             return
 
         await self.remember_message(message)
@@ -203,6 +218,14 @@ class Kernel:
             )
         )
         self.context_store.mark_consumed(message.conversation, message.message_id)
+
+    @staticmethod
+    def _should_suppress_message(message: NormalizedMessage) -> bool:
+        """抑制仅包含不支持入站媒体的消息发布."""
+        if message.message_type != "message":
+            return False
+        drop_reason = message.metadata.get("drop_reason")
+        return drop_reason == "unsupported_media_only"
 
     async def _publish_passthrough_slash_command(
         self,

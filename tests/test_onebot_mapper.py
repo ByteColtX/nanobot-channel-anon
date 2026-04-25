@@ -52,7 +52,12 @@ def test_map_private_message_to_normalized_message() -> None:
             kind="image",
             url="https://example.com/a.png",
             name="a.png",
-            metadata={"source": "message_segment"},
+            metadata={
+                "source": "message_segment",
+                "onebot_segment_type": "image",
+                "original_url": "https://example.com/a.png",
+                "original_file": "a.png",
+            },
         )
     ]
     assert message.metadata["onebot_message_type"] == "private"

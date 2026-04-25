@@ -45,6 +45,8 @@ class _VoiceRow:
 
     vid: str
     filename: str
+    transcription_text: str | None = None
+    transcription_failed: bool = False
 
 
 class ContextPresenter:
@@ -202,7 +204,7 @@ class _CTXBuilder:
         self._images: list[_ImageRow] = []
         self._image_ids: dict[str, str] = {}
         self._voices: list[_VoiceRow] = []
-        self._voice_ids: dict[str, str] = {}
+        self._voice_ids: dict[tuple[str, str | None, bool], str] = {}
         self._private_index = 0
         self._group_index = 0
 
@@ -407,14 +409,20 @@ class _CTXBuilder:
     ) -> str | None:
         """渲染附件占位符并收集可上传媒体."""
         if attachment.kind == "image":
-            if self._is_media_allowed(attachment):
-                iid = self._ensure_image(attachment.url)
-                if not any(item["url"] == attachment.url for item in media):
-                    media.append({"kind": attachment.kind, "url": attachment.url})
+            image_ref = self._image_media_ref(attachment)
+            if image_ref is not None and self._is_media_allowed(attachment):
+                iid = self._ensure_image(image_ref)
+                if not any(item["url"] == image_ref for item in media):
+                    media.append({"kind": attachment.kind, "url": image_ref})
                 return f"[{iid}]"
             return "[image]"
         if attachment.kind == "voice":
-            vid = self._ensure_voice(attachment.url)
+            voice_ref = self._voice_media_ref(attachment)
+            vid = self._ensure_voice(attachment)
+            if voice_ref is not None and not any(
+                item["url"] == voice_ref for item in media
+            ):
+                media.append({"kind": attachment.kind, "url": voice_ref})
             return f"[{vid}]"
         if attachment.kind == "video":
             return "[video]"
@@ -445,15 +453,28 @@ class _CTXBuilder:
         self._images.append(_ImageRow(iid=iid, filename=self._basename(media_ref)))
         return iid
 
-    def _ensure_voice(self, media_ref: str) -> str:
+    def _ensure_voice(self, attachment: Attachment) -> str:
         """分配语音别名."""
+        media_ref = self._voice_media_ref(attachment)
+        if media_ref is None:
+            media_ref = attachment.url or attachment.name or "voice"
         filename = self._basename(media_ref)
-        existing_vid = self._voice_ids.get(filename)
+        transcription_text = self._transcription_text(attachment)
+        transcription_failed = self._transcription_failed(attachment)
+        key = (filename, transcription_text, transcription_failed)
+        existing_vid = self._voice_ids.get(key)
         if existing_vid is not None:
             return existing_vid
         vid = f"v{len(self._voices)}"
-        self._voice_ids[filename] = vid
-        self._voices.append(_VoiceRow(vid=vid, filename=filename))
+        self._voice_ids[key] = vid
+        self._voices.append(
+            _VoiceRow(
+                vid=vid,
+                filename=filename,
+                transcription_text=transcription_text,
+                transcription_failed=transcription_failed,
+            )
+        )
         return vid
 
     def _render_user_rows(self) -> list[str]:
@@ -475,10 +496,15 @@ class _CTXBuilder:
 
     def _render_voice_rows(self) -> list[str]:
         """渲染语音定义行."""
-        return [
-            f"V|{voice.vid}|{self._escape(voice.filename)}"
-            for voice in self._voices
-        ]
+        rows: list[str] = []
+        for voice in self._voices:
+            row = ["V", voice.vid, self._escape(voice.filename)]
+            if voice.transcription_text is not None:
+                row.append(f"={self._escape(voice.transcription_text)}")
+            elif voice.transcription_failed:
+                row.append("!")
+            rows.append("|".join(row))
+        return rows
 
     @staticmethod
     def _basename(media_ref: str) -> str:
@@ -487,6 +513,43 @@ class _CTXBuilder:
         candidate = parsed.path or media_ref
         name = PurePosixPath(candidate).name
         return name or media_ref
+
+    @staticmethod
+    def _image_media_ref(attachment: Attachment) -> str | None:
+        """返回图片优先使用的媒体引用."""
+        local_path = attachment.metadata.get("local_path")
+        if isinstance(local_path, str) and local_path:
+            return local_path
+        if attachment.url:
+            return attachment.url
+        return None
+
+    @staticmethod
+    def _voice_media_ref(attachment: Attachment) -> str | None:
+        """返回语音优先使用的媒体引用."""
+        for key in (
+            "transcription_input_local_file_uri",
+            "local_file_uri",
+        ):
+            value = attachment.metadata.get(key)
+            if isinstance(value, str) and value:
+                return value
+        if attachment.url:
+            return attachment.url
+        return None
+
+    @staticmethod
+    def _transcription_text(attachment: Attachment) -> str | None:
+        """返回转写文本."""
+        value = attachment.metadata.get("transcription_text")
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    @staticmethod
+    def _transcription_failed(attachment: Attachment) -> bool:
+        """返回转写是否失败."""
+        return attachment.metadata.get("transcription_status") == "failed"
 
     def _append_forward_block(self, body: str, message: NormalizedMessage) -> str:
         """在消息体后追加紧凑转发展开块."""

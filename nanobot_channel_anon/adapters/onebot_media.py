@@ -74,7 +74,19 @@ class OneBotMediaAdapter:
             return None
 
         name = _string_value(segment.data.get("file")) or ""
-        metadata = {"source": "message_segment"}
+        metadata = {
+            "source": "message_segment",
+            "onebot_segment_type": segment.type,
+        }
+        original_url = _string_value(segment.data.get("url"))
+        if original_url is not None:
+            metadata["original_url"] = original_url
+        original_file = _string_value(segment.data.get("file"))
+        if original_file is not None:
+            metadata["original_file"] = original_file
+        original_path = _string_value(segment.data.get("path"))
+        if original_path is not None:
+            metadata["original_path"] = original_path
         file_size = _string_value(segment.data.get("file_size"))
         if file_size is not None:
             metadata["file_size"] = file_size

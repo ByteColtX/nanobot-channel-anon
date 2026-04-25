@@ -12,6 +12,7 @@ from nanobot.channels.base import BaseChannel
 from nanobot_channel_anon.adapters.onebot_state import OneBotStateAdapter
 from nanobot_channel_anon.adapters.onebot_transport import OneBotTransport
 from nanobot_channel_anon.config import AnonConfig
+from nanobot_channel_anon.inbound_media import InboundMediaEnricher
 from nanobot_channel_anon.kernel import Kernel
 
 
@@ -34,8 +35,10 @@ class AnonChannel(BaseChannel):
             validated_config = AnonConfig.model_validate(config)
         super().__init__(validated_config, bus)
         self.config: AnonConfig = validated_config
-        self._kernel_factory = kernel_factory or self._build_kernel
-        self._kernel = self._kernel_factory(self.config, bus)
+        if kernel_factory is None:
+            self._kernel = self._build_kernel(self.config, bus)
+        else:
+            self._kernel = kernel_factory(self.config, bus)
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -70,14 +73,18 @@ class AnonChannel(BaseChannel):
         """按普通文本消息发送增量内容."""
         await self._kernel.send_delta(chat_id, delta, metadata)
 
-    @staticmethod
-    def _build_kernel(config: AnonConfig, bus: MessageBus) -> Kernel:
+    def _build_kernel(self, config: AnonConfig, bus: MessageBus) -> Kernel:
         """构建默认内核实例."""
         state = OneBotStateAdapter()
         transport = OneBotTransport(config=config, bus=bus, state=state)
+        inbound_media_enricher = InboundMediaEnricher(
+            config=config,
+            transcribe_audio=self.transcribe_audio,
+        )
         return Kernel(
             config=config,
             bus=bus,
             transport=transport,
             state=state,
+            inbound_media_enricher=inbound_media_enricher,
         )

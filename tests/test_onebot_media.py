@@ -45,7 +45,12 @@ def test_extract_inbound_attachment_from_image_segment() -> None:
         kind="image",
         url="https://example.com/a.png",
         name="a.png",
-        metadata={"source": "message_segment"},
+        metadata={
+            "source": "message_segment",
+            "onebot_segment_type": "image",
+            "original_url": "https://example.com/a.png",
+            "original_file": "a.png",
+        },
     )
 
 
@@ -98,7 +103,12 @@ def test_resolve_media_ref_and_name_trim_scalar_values() -> None:
         kind="image",
         url="12345",
         name="a.png",
-        metadata={"source": "message_segment"},
+        metadata={
+            "source": "message_segment",
+            "onebot_segment_type": "image",
+            "original_url": "12345",
+            "original_file": "a.png",
+        },
     )
 
 
@@ -120,7 +130,39 @@ def test_extract_inbound_attachment_keeps_file_size_metadata() -> None:
         kind="image",
         url="https://example.com/a.png",
         name="a.png",
-        metadata={"source": "message_segment", "file_size": "123"},
+        metadata={
+            "source": "message_segment",
+            "onebot_segment_type": "image",
+            "original_url": "https://example.com/a.png",
+            "original_file": "a.png",
+            "file_size": "123",
+        },
+    )
+
+
+def test_extract_inbound_attachment_keeps_original_path_metadata() -> None:
+    """入站附件应保留 path 以供后续增强逻辑复用."""
+    adapter = OneBotMediaAdapter()
+    segment = OneBotMessageSegment(
+        type="record",
+        data={
+            "file": "voice.amr",
+            "path": "/tmp/voice.amr",
+        },
+    )
+
+    attachment = adapter.extract_inbound_attachment(segment)
+
+    assert attachment == Attachment(
+        kind="voice",
+        url="voice.amr",
+        name="voice.amr",
+        metadata={
+            "source": "message_segment",
+            "onebot_segment_type": "record",
+            "original_file": "voice.amr",
+            "original_path": "/tmp/voice.amr",
+        },
     )
 
 
