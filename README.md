@@ -14,7 +14,6 @@
 - 支持文本、图片、语音、视频、文件发送
 - 附带 NapCat HTTP MCP 工具，可用于删消息、戳一戳、点赞、处理加群/加好友请求
 
-
 ## 安装
 
 当前建议从源码安装和使用：
@@ -45,16 +44,21 @@ uv run nanobot onboard
 
 ```json
 {
-  "enabled": true,
-  "ws_url": "ws://127.0.0.1:3001",
-  "allow_from": ["123456", "987654321"]
+  "channels": {
+    "anon": {
+      "enabled": true,
+      "wsUrl": "ws://127.0.0.1:3001",
+      "accessToken": "your_access_token",
+      "allowFrom": ["*"]
+    }
+  }
 }
 ```
 
-- `ws_url`：你的 NapCat WebSocket 地址
-- `allow_from`：允许接入的 QQ 号或群号
+- `wsUrl`：你的 NapCat WebSocket 地址
+- `allowFrom`：允许接入的 QQ 号或群号
 
-> 注意：`allow_from=[]` 的语义是拒绝所有人。
+> 注意：`allowFrom=[]` 的语义是拒绝所有人。
 
 ### 3. 启动 nanobot
 
@@ -78,7 +82,6 @@ uv build
 
 ## 注意事项
 
-- 启用频道时，`ws_url` 必填
-- `allow_from=[]` 表示拒绝所有来源
+- 启用频道时，`wsUrl` 必填
+- `allowFrom=[]` 表示拒绝所有来源
 - 语音转写依赖上游能力，必要时会使用 `ffmpeg` 转码
-
