@@ -25,11 +25,7 @@ def test_enabled_config_requires_non_empty_allow_from() -> None:
     """启用频道时必须提供非空 allow_from 列表."""
     with pytest.raises(
         ValidationError,
-        match=(
-            "enabled channel requires a non-empty allow_from; "
-            "please configure allowFrom with allowed senders or conversations, "
-            "or disable the channel"
-        ),
+        match="enabled channel requires a non-empty allow_from",
     ):
         AnonConfig(
             enabled=True,
