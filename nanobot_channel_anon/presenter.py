@@ -58,6 +58,7 @@ class ContextPresenter:
         conversation: ConversationRef,
         *,
         self_id: str | None = None,
+        self_name: str | None = None,
         max_ctx_length: int = 300,
         media_max_size_bytes: int = 50 * 1024 * 1024,
         limit: int | None = None,
@@ -110,6 +111,7 @@ class ContextPresenter:
             conversation=conversation,
             messages=messages,
             self_id=self_id,
+            self_name=self_name,
             message_ids=message_ids,
             unread_count=unread_count,
             max_ctx_length=max_ctx_length,
@@ -186,6 +188,7 @@ class _CTXBuilder:
         conversation: ConversationRef,
         messages: list[NormalizedMessage],
         self_id: str | None,
+        self_name: str | None,
         message_ids: list[str],
         unread_count: int,
         max_ctx_length: int,
@@ -195,6 +198,7 @@ class _CTXBuilder:
         self.conversation = conversation
         self.messages = messages
         self.self_id = self_id
+        self.self_name = self_name
         self.message_ids = message_ids
         self.unread_count = unread_count
         self.max_ctx_length = max_ctx_length
@@ -271,7 +275,11 @@ class _CTXBuilder:
     def _ensure_bot_user(self) -> str:
         """确保机器人身份行存在."""
         if self.self_id is not None:
-            return self._ensure_user(self.self_id, self.self_id, is_bot=True)
+            return self._ensure_user(
+                self.self_id,
+                self.self_name or self.self_id,
+                is_bot=True,
+            )
         bot_message = next(
             (message for message in self.messages if message.from_self),
             None,

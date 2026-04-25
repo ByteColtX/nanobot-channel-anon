@@ -25,14 +25,14 @@ def test_profile_hydration_roundtrip() -> None:
     adapter.set_member_profile(
         conversation,
         user_id="123",
-        display_name="群名片",
+        card="群名片",
         nickname="tester",
     )
 
     profile = adapter.get_member_profile(conversation, "123")
 
     assert profile is not None
-    assert profile.display_name == "群名片"
+    assert profile.card == "群名片"
     assert profile.nickname == "tester"
 
 
@@ -44,6 +44,36 @@ def test_self_profile_roundtrip_keeps_nickname() -> None:
 
     assert adapter.self_id == "42"
     assert adapter.self_nickname == "AnonBot"
+
+
+def test_preferred_name_follows_conversation_fallback_rules() -> None:
+    """State adapter should expose card/nickname fallbacks by conversation type."""
+    adapter = OneBotStateAdapter()
+    group_conversation = ConversationRef(kind="group", id="456")
+    private_conversation = ConversationRef(kind="private", id="123")
+
+    adapter.set_member_profile(
+        group_conversation,
+        user_id="1001",
+        card="群名片",
+        nickname="昵称",
+    )
+    adapter.set_member_profile(
+        group_conversation,
+        user_id="1002",
+        nickname="昵称",
+    )
+    adapter.set_member_profile(
+        private_conversation,
+        user_id="2001",
+        card="不会使用",
+        nickname="私聊昵称",
+    )
+
+    assert adapter.preferred_name(group_conversation, "1001") == "群名片"
+    assert adapter.preferred_name(group_conversation, "1002") == "昵称"
+    assert adapter.preferred_name(private_conversation, "2001") == "私聊昵称"
+    assert adapter.preferred_name(private_conversation, "9999") is None
 
 
 def test_group_mute_state_roundtrip_and_expiry() -> None:

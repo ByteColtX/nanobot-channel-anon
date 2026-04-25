@@ -71,6 +71,19 @@ class OutboundMediaUploader(Protocol):
 
 
 @runtime_checkable
+class GroupMemberInfoFetcher(Protocol):
+    """支持按群成员查询资料的传输层扩展."""
+
+    async def get_group_member_info(
+        self,
+        group_id: str,
+        user_id: str,
+    ) -> dict[str, str] | None:
+        """按群和用户 ID 拉取成员资料."""
+        ...
+
+
+@runtime_checkable
 class InboundMediaEnricher(Protocol):
     """支持入站媒体增强的运行时扩展."""
 
@@ -182,14 +195,20 @@ class Kernel:
         extra_messages: Sequence[NormalizedMessage] = (),
     ) -> None:
         """把当前上下文窗口投递到消息总线."""
-        extra_message_ids = {item.message_id for item in extra_messages}
+        message = await self._hydrate_display_names(message)
+        self.context_store.append(message)
+        resolved_extra_messages = [
+            await self._hydrate_display_names(item) for item in extra_messages
+        ]
+        extra_message_ids = {item.message_id for item in resolved_extra_messages}
         presented = self.presenter.present_recent_window(
             self.context_store,
             message.conversation,
             self_id=self.state.self_id,
+            self_name=self.state.self_nickname or self.state.self_id,
             max_ctx_length=self.config.max_ctx_length,
             media_max_size_bytes=self.config.media_max_size_mb * 1024 * 1024,
-            extra_messages=list(extra_messages),
+            extra_messages=resolved_extra_messages,
         )
         ctx_message_ids = [
             message_id
@@ -258,7 +277,7 @@ class Kernel:
         self.state.set_member_profile(
             message.conversation,
             user_id=message.sender_id,
-            display_name=message.sender_name,
+            card=message.sender_name if message.conversation.kind == "group" else "",
             nickname=message.sender_name,
         )
 
@@ -326,6 +345,96 @@ class Kernel:
         if target.conversation != message.conversation:
             return None
         return target
+
+    async def _hydrate_display_names(
+        self,
+        message: NormalizedMessage,
+    ) -> NormalizedMessage:
+        """在发布 CTX/1 前补齐发送者与 mention 的显示名."""
+        sender_name = await self._resolve_display_name(
+            message.conversation,
+            user_id=message.sender_id,
+            fallback_name=message.sender_name,
+            is_bot=message.from_self,
+        )
+        metadata = dict(message.metadata)
+        render_segments = metadata.get("render_segments")
+        if isinstance(render_segments, list):
+            resolved_segments: list[dict[str, object]] = []
+            changed = False
+            for segment in render_segments:
+                if not isinstance(segment, dict):
+                    resolved_segments.append(segment)
+                    continue
+                if segment.get("type") != "mention":
+                    resolved_segments.append(segment)
+                    continue
+                user_id = segment.get("user_id")
+                if not isinstance(user_id, str) or not user_id:
+                    resolved_segments.append(segment)
+                    continue
+                resolved_name = await self._resolve_display_name(
+                    message.conversation,
+                    user_id=user_id,
+                    fallback_name=str(segment.get("name") or ""),
+                    is_bot=user_id == self.state.self_id,
+                )
+                updated_segment = dict(segment)
+                updated_segment["name"] = resolved_name
+                resolved_segments.append(updated_segment)
+                changed = changed or updated_segment != segment
+            if changed:
+                metadata["render_segments"] = resolved_segments
+        if sender_name == message.sender_name and metadata == message.metadata:
+            return message
+        return message.model_copy(
+            update={"sender_name": sender_name, "metadata": metadata}
+        )
+
+    async def _resolve_display_name(
+        self,
+        conversation: ConversationRef,
+        *,
+        user_id: str,
+        fallback_name: str,
+        is_bot: bool = False,
+    ) -> str:
+        """按会话类型与本地状态解析最佳显示名."""
+        if is_bot and user_id == self.state.self_id:
+            return self.state.self_nickname or user_id
+        preferred_name = self.state.preferred_name(conversation, user_id)
+        if preferred_name:
+            return preferred_name
+        if conversation.kind == "group":
+            fetched_profile = await self._fetch_group_member_profile(
+                conversation.id,
+                user_id,
+            )
+            if fetched_profile is not None:
+                self.state.set_member_profile(
+                    conversation,
+                    user_id=user_id,
+                    card=fetched_profile.get("card", ""),
+                    nickname=fetched_profile.get("nickname", ""),
+                )
+                preferred_name = self.state.preferred_name(conversation, user_id)
+                if preferred_name:
+                    return preferred_name
+        normalized_fallback = fallback_name.strip()
+        if normalized_fallback and normalized_fallback != user_id:
+            return normalized_fallback
+        return user_id
+
+    async def _fetch_group_member_profile(
+        self,
+        group_id: str,
+        user_id: str,
+    ) -> dict[str, str] | None:
+        """按需回填群成员资料."""
+        fetcher = self.transport
+        if not isinstance(fetcher, GroupMemberInfoFetcher):
+            return None
+        return await fetcher.get_group_member_info(group_id, user_id)
 
     async def _dispatch_outbound(self, request: ChannelSendRequest) -> None:
         """通过映射层与传输层发出协议请求."""
@@ -475,7 +584,7 @@ class Kernel:
             self.state.set_member_profile(
                 conversation,
                 user_id=self_id,
-                display_name=sender_name,
+                card=sender_name if conversation.kind == "group" else "",
                 nickname=sender_name,
             )
 

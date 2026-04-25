@@ -437,7 +437,7 @@ class OneBotMapper:
         return {
             "type": "mention",
             "user_id": target_id,
-            "name": target_id,
+            "name": _string_value(segment.data.get("name")) or "",
         }
 
     @staticmethod

@@ -58,6 +58,8 @@ class RecordingTransport:
         self.requests: list[list[dict[str, object]]] = []
         self.fetched_messages: dict[str, OneBotRawEvent] = {}
         self.get_message_calls: list[str] = []
+        self.group_member_profiles: dict[tuple[str, str], dict[str, str]] = {}
+        self.get_group_member_info_calls: list[tuple[str, str]] = []
 
     async def start(self) -> None:
         """满足内核接口, 无需额外行为."""
@@ -76,6 +78,15 @@ class RecordingTransport:
         """按消息 ID 返回预置的回查结果."""
         self.get_message_calls.append(message_id)
         return self.fetched_messages.get(message_id)
+
+    async def get_group_member_info(
+        self,
+        group_id: str,
+        user_id: str,
+    ) -> dict[str, str] | None:
+        """按群成员返回预置资料."""
+        self.get_group_member_info_calls.append((group_id, user_id))
+        return self.group_member_profiles.get((group_id, user_id))
 
 
 class FakeInboundMediaEnricher:
@@ -535,13 +546,21 @@ def test_transport_group_reply_backfill_does_not_deadlock_reader_loop() -> None:
             return connection
 
         transport = OneBotTransport(
-            config=_config(allow_from=["group:456"], trigger_on_at=False),
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
             mapper=OneBotMapper(),
             state=state,
             connect=connect,
         )
         kernel = Kernel(
-            config=_config(allow_from=["group:456"], trigger_on_at=False),
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
             bus=bus,
             transport=transport,
             state=state,
@@ -788,7 +807,11 @@ def test_kernel_marks_reply_to_self_from_context_before_policy() -> None:
     async def case() -> None:
         bus = MessageBus()
         kernel = Kernel(
-            config=_config(allow_from=["group:456"], trigger_on_at=False),
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
             bus=bus,
             transport=RecordingTransport(),
         )
@@ -843,7 +866,11 @@ def test_kernel_backfills_missing_reply_target_via_get_msg() -> None:
             }
         )
         kernel = Kernel(
-            config=_config(allow_from=["group:456"], trigger_on_at=False),
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
             bus=bus,
             transport=transport,
         )
@@ -909,7 +936,7 @@ def test_kernel_passthroughs_known_slash_command_for_super_admin_without_storing
         assert "command" not in inbound.metadata
         assert profile is not None
         assert profile.user_id == "123"
-        assert profile.display_name == "Alice"
+        assert profile.card == "Alice"
         assert profile.nickname == "Alice"
         assert (
             kernel.context_store.get_message(
@@ -990,6 +1017,188 @@ def test_kernel_treats_unknown_slash_command_as_normal_message() -> None:
             )
             == message
         )
+
+    asyncio.run(case())
+
+
+def test_kernel_renders_bot_name_from_self_profile_in_ctx() -> None:
+    """CTX/1 应优先使用已同步的 bot 昵称."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        transport = RecordingTransport()
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=transport,
+        )
+        kernel.state.set_self_profile(user_id="42", nickname="咕咕")
+        await kernel.remember_message(
+            NormalizedMessage(
+                message_id="assistant-1",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="42",
+                sender_name="咕咕",
+                content="在",
+                from_self=True,
+            )
+        )
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="user-1",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="123",
+                sender_name="Alice",
+                content="hello",
+            )
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert "U|u0|42|咕咕|bot" in inbound.content
+
+    asyncio.run(case())
+
+
+def test_kernel_backfills_group_mention_name_via_member_info() -> None:
+    """群聊 mention 缺资料时应回填 card 并写回状态缓存."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        transport = RecordingTransport()
+        transport.group_member_profiles[("456", "1001")] = {
+            "user_id": "1001",
+            "card": "原",
+            "nickname": "擎天霹雳寄霸天",
+        }
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=transport,
+        )
+        kernel.state.set_self_profile(user_id="42", nickname="咕咕")
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="user-1",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="123",
+                sender_name="Alice",
+                content="hi",
+                metadata={
+                    "render_segments": [
+                        {"type": "text", "text": "hi "},
+                        {"type": "mention", "user_id": "1001", "name": ""},
+                    ]
+                },
+            )
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        profile = kernel.state.get_member_profile(
+            ConversationRef(kind="group", id="456"),
+            "1001",
+        )
+
+        assert transport.get_group_member_info_calls == [("456", "1001")]
+        assert "U|u2|1001|原" in inbound.content
+        assert "M|user-1|u1|hi @u2" in inbound.content
+        assert profile is not None
+        assert profile.card == "原"
+        assert profile.nickname == "擎天霹雳寄霸天"
+
+    asyncio.run(case())
+
+
+def test_kernel_falls_back_to_group_nickname_when_card_missing() -> None:
+    """群聊成员无 card 时应回退到 nickname."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        transport = RecordingTransport()
+        transport.group_member_profiles[("456", "1002")] = {
+            "user_id": "1002",
+            "card": "",
+            "nickname": "昵称",
+        }
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=transport,
+        )
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="user-1",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="123",
+                sender_name="Alice",
+                content="hi",
+                metadata={
+                    "render_segments": [
+                        {"type": "text", "text": "hi "},
+                        {"type": "mention", "user_id": "1002", "name": ""},
+                    ]
+                },
+            )
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert "U|u2|1002|昵称" in inbound.content
+
+    asyncio.run(case())
+
+
+def test_kernel_falls_back_to_user_id_when_group_member_info_missing() -> None:
+    """群聊成员资料仍缺失时应最终回退到 QQ 号."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        transport = RecordingTransport()
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=transport,
+        )
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="user-1",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="123",
+                sender_name="Alice",
+                content="hi",
+                metadata={
+                    "render_segments": [
+                        {"type": "text", "text": "hi "},
+                        {"type": "mention", "user_id": "1003", "name": ""},
+                    ]
+                },
+            )
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert transport.get_group_member_info_calls == [("456", "1003")]
+        assert "U|u2|1003|1003" in inbound.content
 
     asyncio.run(case())
 

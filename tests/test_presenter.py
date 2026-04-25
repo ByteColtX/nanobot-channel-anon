@@ -378,6 +378,21 @@ def test_present_recent_window_renders_voice_row_failure_marker() -> None:
     assert rendered.media == [{"kind": "voice", "url": "file:///tmp/voice.amr"}]
 
 
+def test_present_recent_window_uses_self_name_for_bot_user_row() -> None:
+    """Presenter should render bot U row with provided self_name."""
+    store = ContextStore(max_messages_per_conversation=5)
+    store.append(_message("m1", sender_id="123", sender_name="Alice", content="你好"))
+
+    rendered = ContextPresenter().present_recent_window(
+        store,
+        _conversation(),
+        self_id="42",
+        self_name="AnonBot",
+    )
+
+    assert "U|u0|42|AnonBot|bot" in rendered.text
+
+
 def test_present_recent_window_renders_poke_as_event_row() -> None:
     """Poke events should remain compact E rows and not increase unread count."""
     store = ContextStore(max_messages_per_conversation=5)

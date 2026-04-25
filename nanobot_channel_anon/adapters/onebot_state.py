@@ -13,7 +13,7 @@ class MemberProfile:
     """OneBot 成员资料快照."""
 
     user_id: str
-    display_name: str = ""
+    card: str = ""
     nickname: str = ""
 
 
@@ -65,14 +65,14 @@ class OneBotStateAdapter:
         conversation: ConversationRef,
         *,
         user_id: str,
-        display_name: str = "",
+        card: str = "",
         nickname: str = "",
     ) -> None:
         """写入某个会话内成员的资料快照."""
         bucket = self._profiles.setdefault(conversation.key, {})
         bucket[user_id] = MemberProfile(
             user_id=user_id,
-            display_name=display_name,
+            card=card,
             nickname=nickname,
         )
 
@@ -83,6 +83,19 @@ class OneBotStateAdapter:
     ) -> MemberProfile | None:
         """读取某个会话内成员资料."""
         return self._profiles.get(conversation.key, {}).get(user_id)
+
+    def preferred_name(
+        self,
+        conversation: ConversationRef,
+        user_id: str,
+    ) -> str | None:
+        """按会话类型返回成员最佳显示名."""
+        profile = self.get_member_profile(conversation, user_id)
+        if profile is None:
+            return None
+        if conversation.kind == "group":
+            return profile.card or profile.nickname or profile.user_id
+        return profile.nickname or profile.user_id
 
     def set_group_muted_until(self, group_id: str, muted_until: int | None) -> None:
         """更新指定群的禁言截止时间."""

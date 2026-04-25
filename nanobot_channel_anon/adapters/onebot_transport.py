@@ -319,6 +319,27 @@ class OneBotTransport:
             }
         )
 
+    async def get_group_member_info(
+        self,
+        group_id: str,
+        user_id: str,
+    ) -> dict[str, str] | None:
+        """按群和用户 ID 拉取成员资料."""
+        response = await self._send_api_request(
+            "get_group_member_info",
+            {"group_id": group_id, "user_id": user_id},
+        )
+        if response.status == "failed" or str(response.retcode or "") not in {"", "0"}:
+            return None
+        payload = response.data if isinstance(response.data, dict) else None
+        if payload is None:
+            return None
+        return {
+            "user_id": normalize_onebot_id(payload.get("user_id")) or user_id,
+            "card": str(payload.get("card") or "").strip(),
+            "nickname": str(payload.get("nickname") or "").strip(),
+        }
+
     async def _send_api_request(
         self,
         action: str,

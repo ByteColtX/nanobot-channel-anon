@@ -109,7 +109,7 @@ def test_map_group_message_preserves_render_segments_for_mentions() -> None:
             "user_id": "123",
             "message": [
                 {"type": "text", "data": {"text": "hi "}},
-                {"type": "at", "data": {"qq": "1001", "name": "不可信名"}},
+                {"type": "at", "data": {"qq": "1001", "name": "群名片"}},
                 {"type": "text", "data": {"text": " and "}},
                 {"type": "at", "data": {"qq": "all"}},
                 {"type": "text", "data": {"text": " done"}},
@@ -126,7 +126,7 @@ def test_map_group_message_preserves_render_segments_for_mentions() -> None:
         {
             "type": "mention",
             "user_id": "1001",
-            "name": "1001",
+            "name": "群名片",
         },
         {"type": "text", "text": " and "},
         {"type": "mention_all"},
@@ -159,7 +159,7 @@ def test_map_group_message_preserves_self_mention_and_render_segments() -> None:
     assert message.mentioned_self is True
     assert message.metadata["render_segments"] == [
         {"type": "text", "text": "hi "},
-        {"type": "mention", "user_id": "42", "name": "42"},
+        {"type": "mention", "user_id": "42", "name": ""},
         {"type": "text", "text": " there"},
     ]
 
