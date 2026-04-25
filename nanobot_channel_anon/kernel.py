@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -10,6 +12,7 @@ from nanobot.bus.queue import MessageBus
 from pydantic import BaseModel
 
 from nanobot_channel_anon.adapters.onebot_mapper import OneBotMapper
+from nanobot_channel_anon.adapters.onebot_media import OneBotMediaAdapter
 from nanobot_channel_anon.adapters.onebot_state import OneBotStateAdapter
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.context_store import ContextStore
@@ -22,6 +25,9 @@ from nanobot_channel_anon.onebot import OneBotMessageSegment, OneBotRawEvent
 from nanobot_channel_anon.policy import PolicyContext, PolicyEngine
 from nanobot_channel_anon.presenter import ContextPresenter
 from nanobot_channel_anon.utils import normalize_onebot_id
+
+_CQ_MEDIA_PATTERN = re.compile(r"\[CQ:([^,\]]+)(?:,([^\]]+))?\]")
+_SUPPORTED_INLINE_MEDIA_TYPES = {"image", "record", "video", "file"}
 
 
 @runtime_checkable
@@ -55,6 +61,15 @@ class ReplyMessageFetcher(Protocol):
         ...
 
 
+@runtime_checkable
+class OutboundMediaUploader(Protocol):
+    """支持上传本地媒体并返回可发送引用的传输层扩展."""
+
+    async def upload_local_media(self, path: Path) -> str:
+        """上传本地媒体文件并返回 NapCat file_path."""
+        ...
+
+
 class Kernel:
     """频道主运行时编排器."""
 
@@ -76,6 +91,10 @@ class Kernel:
         self.transport = transport
         self.state = state or OneBotStateAdapter()
         self.mapper = mapper or OneBotMapper(self_id=self.state.self_id)
+        if isinstance(self.mapper.media, OneBotMediaAdapter):
+            self.media = self.mapper.media
+        else:
+            self.media = OneBotMediaAdapter()
         self.context_store = context_store or ContextStore(
             max_messages_per_conversation=config.max_context_messages
         )
@@ -287,12 +306,110 @@ class Kernel:
 
     async def _dispatch_outbound(self, request: ChannelSendRequest) -> None:
         """通过映射层与传输层发出协议请求."""
-        requests = self.mapper.map_outbound_request(request)
+        resolved_request = await self._resolve_outbound_request_media(request)
+        requests = self.mapper.map_outbound_request(resolved_request)
         sender = self.transport
         if not isinstance(sender, RequestBatchSender):
             raise TypeError("transport does not support send_requests(requests)")
         responses = await sender.send_requests(requests)
         self._remember_outbound_messages(requests, responses)
+
+    async def _resolve_outbound_request_media(
+        self,
+        request: ChannelSendRequest,
+    ) -> ChannelSendRequest:
+        """在映射前解析并上传本地媒体引用."""
+        resolved_media = await self._resolve_outbound_media_refs(request.media)
+        resolved_content = await self._resolve_inline_cq_media_refs(request.content)
+        if resolved_media == request.media and resolved_content == request.content:
+            return request
+        return request.model_copy(
+            update={"media": resolved_media, "content": resolved_content}
+        )
+
+    async def _resolve_outbound_media_refs(
+        self,
+        media_refs: Sequence[str],
+    ) -> list[str]:
+        """上传 request.media 中的本地媒体并返回可发送引用."""
+        resolved_refs: list[str] = []
+        for media_ref in media_refs:
+            resolved_ref = await self._resolve_single_outbound_media_ref(media_ref)
+            resolved_refs.append(resolved_ref)
+        return resolved_refs
+
+    async def _resolve_single_outbound_media_ref(self, media_ref: str) -> str:
+        """按单个媒体引用决定是否需要上传."""
+        normalized_media_ref = self.media.normalize_outbound_media_ref(media_ref)
+        local_path = self.media.local_path_from_media_ref(normalized_media_ref)
+        if local_path is None:
+            return normalized_media_ref
+        uploader = self.transport
+        if not isinstance(uploader, OutboundMediaUploader):
+            raise TypeError("transport does not support upload_local_media(path)")
+        return await uploader.upload_local_media(local_path)
+
+    async def _resolve_inline_cq_media_refs(self, content: str) -> str:
+        """上传内联 CQ 媒体里的本地文件引用并重写文本."""
+        if not content:
+            return content
+
+        parts: list[str] = []
+        cursor = 0
+        for match in _CQ_MEDIA_PATTERN.finditer(content):
+            start, end = match.span()
+            parts.append(content[cursor:start])
+            parts.append(await self._rewrite_inline_cq_media_match(match))
+            cursor = end
+        parts.append(content[cursor:])
+        return "".join(parts)
+
+    async def _rewrite_inline_cq_media_match(self, match: re.Match[str]) -> str:
+        """只重写受支持媒体 CQ 的 file 参数."""
+        cq_type = match.group(1).strip().lower()
+        params_raw = match.group(2) or ""
+        if cq_type not in _SUPPORTED_INLINE_MEDIA_TYPES:
+            return match.group(0)
+        params = self._parse_inline_cq_params(params_raw)
+        if not params:
+            return match.group(0)
+        media_ref = params.get("file", "").strip()
+        if not media_ref:
+            return match.group(0)
+        resolved_media_ref = await self._resolve_single_outbound_media_ref(media_ref)
+        if resolved_media_ref == media_ref:
+            return match.group(0)
+        rebuilt_parts: list[str] = []
+        replaced = False
+        for part in params_raw.split(","):
+            key, separator, value = part.partition("=")
+            if not separator:
+                return match.group(0)
+            if not replaced and key.strip() == "file":
+                rebuilt_parts.append(f"{key}={resolved_media_ref}")
+                replaced = True
+                continue
+            rebuilt_parts.append(f"{key}={value}")
+        if not replaced:
+            return match.group(0)
+        rebuilt_params = ",".join(rebuilt_parts)
+        return f"[CQ:{match.group(1)},{rebuilt_params}]"
+
+    @staticmethod
+    def _parse_inline_cq_params(params_raw: str) -> dict[str, str]:
+        """解析内联 CQ 参数为键值对."""
+        params: dict[str, str] = {}
+        if not params_raw:
+            return params
+        for part in params_raw.split(","):
+            key, separator, value = part.partition("=")
+            if not separator:
+                return {}
+            normalized_key = key.strip()
+            if not normalized_key:
+                return {}
+            params[normalized_key] = value
+        return params
 
     def _remember_outbound_messages(
         self,

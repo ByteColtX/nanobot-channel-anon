@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from nanobot_channel_anon.domain import Attachment
 from nanobot_channel_anon.onebot import OneBotMessageSegment
@@ -122,6 +122,28 @@ class OneBotMediaAdapter:
         if not normalized_media_ref:
             raise ValueError("attachment url is required")
         return normalized_media_ref
+
+    def is_local_outbound_media_ref(self, media_ref: str) -> bool:
+        """判断出站媒体引用是否指向本地文件."""
+        return self.local_path_from_media_ref(media_ref) is not None
+
+    def local_path_from_media_ref(self, media_ref: str) -> Path | None:
+        """从本地媒体引用中提取绝对文件路径."""
+        normalized_media_ref = self.normalize_outbound_media_ref(media_ref)
+        parsed = urlparse(normalized_media_ref)
+        if parsed.scheme == "file":
+            path = unquote(parsed.path).strip()
+            if not path:
+                raise ValueError("file:// media ref must include a path")
+            return Path(path)
+        if parsed.scheme:
+            return None
+        path = Path(normalized_media_ref)
+        if not path.is_absolute():
+            return None
+        if path.parts[:2] == ("/", "napcat"):
+            return None
+        return path
 
     def classify_outbound_media_ref(self, media_ref: str) -> str:
         """根据媒体引用推断标准化附件类型."""

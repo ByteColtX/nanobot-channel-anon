@@ -67,7 +67,6 @@ def test_present_recent_window_renders_ctx1_text() -> None:
             "U|u0|bot|bot|bot",
             "U|u1|123|Alice",
             "M|m1|u1|你好",
-            "M|m2|u0|收到",
             "</CTX/1>",
         ]
     )

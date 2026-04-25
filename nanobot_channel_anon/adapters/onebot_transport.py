@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from pathlib import Path
 from typing import Any, Protocol
 
 import aiohttp
@@ -20,6 +23,8 @@ from nanobot_channel_anon.onebot import OneBotAPIRequest, OneBotRawEvent
 from nanobot_channel_anon.utils import normalize_onebot_id
 
 _RESPONSE_TIMEOUT_SECONDS = 10.0
+_OUTBOUND_UPLOAD_CHUNK_SIZE = 64 * 1024
+_OUTBOUND_UPLOAD_FILE_RETENTION_MS = 30 * 1000
 _GROUP_MUTE_NOTICE_SUBTYPES = {"ban", "lift_ban"}
 
 
@@ -181,33 +186,20 @@ class OneBotTransport:
         requests: Sequence[OneBotAPIRequest],
     ) -> list[OneBotRawEvent]:
         """发送一批 OneBot 动作请求."""
-        if self._connection is None:
-            raise RuntimeError("transport is not running")
-
         responses: list[OneBotRawEvent] = []
         for request in requests:
-            outbound = request.model_copy(
-                update={"echo": request.echo or self._next_echo()}
+            response = await self._send_api_request(
+                request.action,
+                request.params if isinstance(request.params, dict) else None,
+                request=request,
             )
-            future: asyncio.Future[OneBotRawEvent] = (
-                asyncio.get_running_loop().create_future()
-            )
-            self._pending_responses[outbound.echo or ""] = future
-            self.sent_requests.append(outbound)
-            await self._connection.send_json(outbound.model_dump(exclude_none=True))
-            try:
-                response = await asyncio.wait_for(
-                    future, timeout=_RESPONSE_TIMEOUT_SECONDS
-                )
-            except TimeoutError as exc:
-                raise RuntimeError(
-                    f"OneBot action timed out: {outbound.action}"
-                ) from exc
-            finally:
-                self._pending_responses.pop(outbound.echo or "", None)
-            self._raise_for_failed_response(outbound, response)
+            self._raise_for_failed_response(request, response)
             responses.append(response)
         return responses
+
+    async def upload_local_media(self, path: Path) -> str:
+        """将本地媒体文件上传为 NapCat 可发送的 file_path."""
+        return await self._upload_outbound_file_via_stream(path)
 
     async def _read_loop(self) -> None:
         """持续读取 OneBot 事件与响应."""
@@ -331,27 +323,112 @@ class OneBotTransport:
         self,
         action: str,
         params: dict[str, Any] | None,
+        *,
+        request: OneBotAPIRequest | None = None,
     ) -> OneBotRawEvent:
         """发送一条需要等待 echo 响应的 API 请求."""
-        request = OneBotAPIRequest(action=action, params=params)
+        outbound_request = request or OneBotAPIRequest(action=action, params=params)
         if self._connection is None:
             raise RuntimeError("transport is not running")
 
-        outbound = request.model_copy(
-            update={"echo": request.echo or self._next_echo()}
+        outbound = outbound_request.model_copy(
+            update={"echo": outbound_request.echo or self._next_echo()}
         )
         future: asyncio.Future[OneBotRawEvent] = (
             asyncio.get_running_loop().create_future()
         )
         self._pending_responses[outbound.echo or ""] = future
+        self.sent_requests.append(outbound)
         await self._connection.send_json(outbound.model_dump(exclude_none=True))
         try:
             response = await asyncio.wait_for(
                 future, timeout=_RESPONSE_TIMEOUT_SECONDS
             )
+        except TimeoutError as exc:
+            raise RuntimeError(f"OneBot action timed out: {outbound.action}") from exc
         finally:
             self._pending_responses.pop(outbound.echo or "", None)
         return response
+
+    async def _upload_outbound_file_via_stream(self, path: Path) -> str:
+        """分块上传本地媒体文件并返回 NapCat file_path."""
+        resolved_path = path.resolve(strict=False)
+        with resolved_path.open("rb") as file_obj:
+            file_obj.seek(0, 2)
+            file_size = file_obj.tell()
+            max_size = self.config.media_max_size_mb * 1024 * 1024
+            if file_size > max_size:
+                raise ValueError(
+                    f"outbound media exceeds size limit: {resolved_path.name}"
+                )
+            file_obj.seek(0)
+            digest = hashlib.sha256()
+            while chunk := file_obj.read(_OUTBOUND_UPLOAD_CHUNK_SIZE):
+                digest.update(chunk)
+            total_chunks = max(
+                1,
+                (file_size + _OUTBOUND_UPLOAD_CHUNK_SIZE - 1)
+                // _OUTBOUND_UPLOAD_CHUNK_SIZE,
+            )
+            file_obj.seek(0)
+            stream_id = self._next_echo()
+            for chunk_index in range(total_chunks):
+                chunk = file_obj.read(_OUTBOUND_UPLOAD_CHUNK_SIZE)
+                response = await self._send_api_request(
+                    "upload_file_stream",
+                    {
+                        "stream_id": stream_id,
+                        "chunk_data": base64.b64encode(chunk).decode("ascii"),
+                        "chunk_index": chunk_index,
+                        "total_chunks": total_chunks,
+                        "file_size": file_size,
+                        "expected_sha256": digest.hexdigest(),
+                        "filename": resolved_path.name,
+                        "file_retention": _OUTBOUND_UPLOAD_FILE_RETENTION_MS,
+                    },
+                )
+                self._ensure_outbound_upload_chunk_ok(
+                    response, filename=resolved_path.name
+                )
+        completion = await self._send_api_request(
+            "upload_file_stream",
+            {"stream_id": stream_id, "is_complete": True},
+        )
+        return self._extract_uploaded_file_path(completion, filename=resolved_path.name)
+
+    @staticmethod
+    def _ensure_outbound_upload_chunk_ok(
+        response: OneBotRawEvent,
+        *,
+        filename: str,
+    ) -> None:
+        """校验上传分块响应至少未显式失败."""
+        if response.status == "failed" or str(response.retcode or "") not in {"", "0"}:
+            raise RuntimeError(f"upload_file_stream failed for {filename}")
+
+    @staticmethod
+    def _extract_uploaded_file_path(
+        response: OneBotRawEvent,
+        *,
+        filename: str,
+    ) -> str:
+        """从上传完成响应里提取 NapCat file_path."""
+        data = response.data
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"upload_file_stream completion missing data for {filename}"
+            )
+        status = str(data.get("status") or "").strip()
+        if status != "file_complete":
+            raise RuntimeError(
+                f"upload_file_stream completion missing file_complete for {filename}"
+            )
+        file_path = str(data.get("file_path") or "").strip()
+        if not file_path:
+            raise RuntimeError(
+                f"upload_file_stream completion missing file_path for {filename}"
+            )
+        return file_path
 
     async def _fetch_self_identity(self) -> None:
         """拉取并记录 bot 自身身份信息."""

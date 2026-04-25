@@ -26,6 +26,7 @@ class FakeTransport:
         self.sent_batches: list[list[dict[str, object]]] = []
         self.started = asyncio.Event()
         self.stop_requested = asyncio.Event()
+        self.upload_calls: list[str] = []
 
     async def start(self) -> None:
         """启动后保持运行直到收到停止信号."""
@@ -44,6 +45,12 @@ class FakeTransport:
             [request.model_dump(exclude_none=False) for request in requests]
         )
         return []
+
+    async def upload_local_media(self, path) -> str:
+        """记录本地媒体上传调用并返回伪 NapCat 路径."""
+        normalized_path = str(path)
+        self.upload_calls.append(normalized_path)
+        return f"/napcat/cache/{normalized_path.rsplit('/', 1)[-1]}"
 
 
 def _make_channel(
@@ -149,6 +156,7 @@ def test_channel_send_delegates_to_transport_send_requests() -> None:
             )
         )
 
+        assert transport.upload_calls == ["/tmp/demo.png"]
         assert transport.sent_batches == [
             [
                 {
@@ -157,7 +165,10 @@ def test_channel_send_delegates_to_transport_send_requests() -> None:
                         "group_id": 123,
                         "message": [
                             {"type": "reply", "data": {"id": "42"}},
-                            {"type": "image", "data": {"file": "file:///tmp/demo.png"}},
+                            {
+                                "type": "image",
+                                "data": {"file": "/napcat/cache/demo.png"},
+                            },
                             {"type": "text", "data": {"text": "hello"}},
                         ],
                     },

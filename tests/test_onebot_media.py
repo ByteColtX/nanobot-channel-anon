@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from nanobot_channel_anon.adapters.onebot_media import OneBotMediaAdapter
 from nanobot_channel_anon.domain import Attachment
 from nanobot_channel_anon.onebot import OneBotMessageSegment
@@ -120,3 +122,25 @@ def test_extract_inbound_attachment_keeps_file_size_metadata() -> None:
         name="a.png",
         metadata={"source": "message_segment", "file_size": "123"},
     )
+
+
+def test_local_path_from_media_ref_accepts_file_uri_and_absolute_path() -> None:
+    """本地 file:// 与绝对路径应被识别为需上传媒体."""
+    adapter = OneBotMediaAdapter()
+
+    assert adapter.local_path_from_media_ref(
+        "file:///tmp/demo.wav"
+    ) == Path("/tmp/demo.wav")
+    assert adapter.local_path_from_media_ref("/tmp/demo.wav") == Path("/tmp/demo.wav")
+    assert adapter.is_local_outbound_media_ref("file:///tmp/demo.wav") is True
+    assert adapter.is_local_outbound_media_ref("/tmp/demo.wav") is True
+
+
+def test_local_path_from_media_ref_skips_remote_url_and_napcat_path() -> None:
+    """远端 URL 与 NapCat 路径不应再次被视为本地上传输入."""
+    adapter = OneBotMediaAdapter()
+
+    assert adapter.local_path_from_media_ref("https://example.com/demo.png") is None
+    assert adapter.local_path_from_media_ref("/napcat/cache/demo.png") is None
+    assert adapter.is_local_outbound_media_ref("https://example.com/demo.png") is False
+    assert adapter.is_local_outbound_media_ref("/napcat/cache/demo.png") is False

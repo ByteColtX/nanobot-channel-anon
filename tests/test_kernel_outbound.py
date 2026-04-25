@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from pydantic import BaseModel
@@ -21,6 +22,9 @@ class RecordingTransport:
         """初始化请求记录器."""
         self.requests: list[list[dict[str, object]]] = []
         self.responses: list[OneBotRawEvent] = []
+        self.upload_calls: list[str] = []
+        self.upload_results: dict[str, str] = {}
+        self.upload_error: Exception | None = None
 
     async def start(self) -> None:
         """满足接口要求."""
@@ -41,6 +45,17 @@ class RecordingTransport:
             for index, _ in enumerate(dumped_requests)
         ]
 
+    async def upload_local_media(self, path: str | object) -> str:
+        """记录本地媒体上传调用并返回伪 file_path."""
+        normalized_path = str(path)
+        self.upload_calls.append(normalized_path)
+        if self.upload_error is not None:
+            raise self.upload_error
+        return self.upload_results.get(
+            normalized_path,
+            f"/napcat/cache/{normalized_path.rsplit('/', 1)[-1]}",
+        )
+
 
 def _config() -> AnonConfig:
     """构造最小测试配置."""
@@ -60,6 +75,8 @@ def test_send_uses_mapper_and_transport_request_path() -> None:
         transport = RecordingTransport()
         kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
 
+        transport.upload_results["/tmp/voice.wav"] = "/napcat/cache/voice.wav"
+
         await kernel.send(
             OutboundMessage(
                 channel="anon",
@@ -70,6 +87,7 @@ def test_send_uses_mapper_and_transport_request_path() -> None:
             )
         )
 
+        assert transport.upload_calls == ["/tmp/voice.wav"]
         assert transport.requests == [
             [
                 {
@@ -78,7 +96,10 @@ def test_send_uses_mapper_and_transport_request_path() -> None:
                         "group_id": 456,
                         "message": [
                             {"type": "reply", "data": {"id": "99"}},
-                            {"type": "record", "data": {"file": "file:///tmp/voice.wav"}},
+                            {
+                                "type": "record",
+                                "data": {"file": "/napcat/cache/voice.wav"},
+                            },
                         ],
                     },
                     "echo": None,
@@ -129,6 +150,8 @@ def test_send_parses_inline_cq_media_and_mentions() -> None:
         transport = RecordingTransport()
         kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
 
+        transport.upload_results["/tmp/voice.wav"] = "/napcat/cache/voice.wav"
+
         await kernel.send(
             OutboundMessage(
                 channel="anon",
@@ -141,6 +164,7 @@ def test_send_parses_inline_cq_media_and_mentions() -> None:
             )
         )
 
+        assert transport.upload_calls == ["/tmp/voice.wav"]
         assert transport.requests == [
             [
                 {
@@ -160,7 +184,10 @@ def test_send_parses_inline_cq_media_and_mentions() -> None:
                     "params": {
                         "group_id": 456,
                         "message": [
-                            {"type": "record", "data": {"file": "file:///tmp/voice.wav"}},
+                            {
+                                "type": "record",
+                                "data": {"file": "/napcat/cache/voice.wav"},
+                            },
                         ],
                     },
                     "echo": None,
@@ -263,6 +290,176 @@ def test_send_delta_skips_empty_text() -> None:
 
         await kernel.send_delta("private:99", "", {"kind": "delta"})
 
+        assert transport.requests == []
+
+    asyncio.run(case())
+
+
+def test_send_uploads_local_request_media_before_mapping() -> None:
+    """request.media 里的本地路径应先上传再参与现有拆包规则."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_results["/tmp/voice.wav"] = "/napcat/cache/voice.wav"
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="caption",
+                media=["/tmp/voice.wav"],
+                metadata={"reply_to_message_id": "99"},
+            )
+        )
+
+        assert transport.upload_calls == ["/tmp/voice.wav"]
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {"type": "reply", "data": {"id": "99"}},
+                            {
+                                "type": "record",
+                                "data": {"file": "/napcat/cache/voice.wav"},
+                            },
+                        ],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [{"type": "text", "data": {"text": "caption"}}],
+                    },
+                    "echo": None,
+                },
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_uploads_local_inline_cq_media_before_mapping() -> None:
+    """内联 CQ 媒体中的本地路径应先上传再由 mapper 拆段."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_results["/tmp/demo.wav"] = "/napcat/cache/demo.wav"
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="before[CQ:record,file=/tmp/demo.wav]after",
+            )
+        )
+
+        assert transport.upload_calls == ["/tmp/demo.wav"]
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [{"type": "text", "data": {"text": "before"}}],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {
+                                "type": "record",
+                                "data": {"file": "/napcat/cache/demo.wav"},
+                            },
+                        ],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [{"type": "text", "data": {"text": "after"}}],
+                    },
+                    "echo": None,
+                },
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_skips_upload_for_remote_refs() -> None:
+    """远端 URL 与 NapCat file_path 不应重复上传."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="caption[CQ:image,file=/napcat/cache/demo.png]",
+                media=["https://example.com/demo.png"],
+            )
+        )
+
+        assert transport.upload_calls == []
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {
+                                "type": "image",
+                                "data": {"file": "https://example.com/demo.png"},
+                            },
+                            {"type": "text", "data": {"text": "caption"}},
+                            {
+                                "type": "image",
+                                "data": {"file": "/napcat/cache/demo.png"},
+                            },
+                        ],
+                    },
+                    "echo": None,
+                }
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_fails_before_send_requests_when_upload_fails() -> None:
+    """上传失败时不应继续发送 OneBot 消息请求."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_error = RuntimeError("missing file_path")
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        with pytest.raises(RuntimeError, match="missing file_path"):
+            await kernel.send(
+                OutboundMessage(
+                    channel="anon",
+                    chat_id="private:99",
+                    content="caption",
+                    media=["/tmp/demo.png"],
+                )
+            )
+
+        assert transport.upload_calls == ["/tmp/demo.png"]
         assert transport.requests == []
 
     asyncio.run(case())
