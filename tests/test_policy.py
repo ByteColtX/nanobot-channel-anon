@@ -92,30 +92,85 @@ def test_is_allowed_honors_super_admins_even_when_allowlist_rejects() -> None:
     ) is True
 
 
-def test_parse_command_recognizes_normal_and_admin_slash_commands() -> None:
-    """Slash parsing should distinguish normal and admin-only commands."""
+def test_classify_slash_command_returns_known_menu_command() -> None:
+    """Known slash commands should return the canonical menu command string."""
+    policy = PolicyEngine(AnonConfig())
+
+    command = policy.classify_slash_command(_message(content="/help"))
+
+    assert command == "/help"
+
+
+def test_classify_slash_command_trims_whitespace_around_known_command() -> None:
+    """Known slash command matching should ignore surrounding whitespace."""
+    policy = PolicyEngine(AnonConfig())
+
+    command = policy.classify_slash_command(_message(content="  /help  "))
+
+    assert command == "/help"
+
+
+def test_classify_slash_command_normalizes_known_command_case() -> None:
+    """Known slash commands should normalize case before menu matching."""
+    policy = PolicyEngine(AnonConfig())
+
+    command = policy.classify_slash_command(_message(content="/HeLp status"))
+
+    assert command == "/help"
+
+
+def test_classify_slash_command_requires_exact_command_match() -> None:
+    """Prefix-like commands should not match a shorter menu entry."""
+    policy = PolicyEngine(AnonConfig())
+
+    command = policy.classify_slash_command(_message(content="/helpful status"))
+
+    assert command is None
+
+
+def test_classify_slash_command_returns_none_for_unknown_slash() -> None:
+    """Unknown slash commands should not match the fixed menu."""
+    policy = PolicyEngine(AnonConfig())
+
+    command = policy.classify_slash_command(_message(content="/foo bar"))
+
+    assert command is None
+
+
+def test_classify_slash_command_rejects_admin_like_unknown_slash() -> None:
+    """Unknown admin-like slash forms should stay outside the fixed menu."""
     policy = PolicyEngine(AnonConfig(super_admins=["999"]))
 
-    normal = policy.parse_command(_message(content="/help"))
-    admin = policy.parse_command(_message(sender_id="999", content="/admin reload"))
-
-    assert normal is not None
-    assert normal.name == "help"
-    assert normal.admin_only is False
-    assert admin is not None
-    assert admin.name == "reload"
-    assert admin.admin_only is True
-
-
-def test_parse_command_rejects_admin_command_from_non_admin() -> None:
-    """Admin commands should not parse for non-admin senders."""
-    policy = PolicyEngine(AnonConfig(super_admins=["999"]))
-
-    command = policy.parse_command(
-        _message(sender_id="123", content="/admin reload")
+    command = policy.classify_slash_command(
+        _message(sender_id="999", content="/admin reload")
     )
 
     assert command is None
+
+
+def test_should_passthrough_slash_command_requires_known_command_and_super_admin(
+) -> None:
+    """Slash passthrough should require both menu membership and super admin status."""
+    policy = PolicyEngine(AnonConfig(super_admins=["999"]))
+
+    assert (
+        policy.should_passthrough_slash_command(
+            _message(sender_id="999", content="/help status")
+        )
+        is True
+    )
+    assert (
+        policy.should_passthrough_slash_command(
+            _message(sender_id="123", content="/help status")
+        )
+        is False
+    )
+    assert (
+        policy.should_passthrough_slash_command(
+            _message(sender_id="999", content="/foo bar")
+        )
+        is False
+    )
 
 
 def test_decide_trigger_private_message_uses_probability_reason() -> None:

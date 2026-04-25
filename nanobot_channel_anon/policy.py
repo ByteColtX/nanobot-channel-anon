@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.domain import (
     NormalizedMessage,
-    SlashCommand,
     TriggerDecision,
     TriggerReason,
 )
@@ -26,6 +25,18 @@ class PolicyContext:
 class PolicyEngine:
     """统一处理允许访问、命令识别与触发决策."""
 
+    _KNOWN_SLASH_COMMANDS = frozenset(
+        {
+            "/new",
+            "/stop",
+            "/restart",
+            "/status",
+            "/dream",
+            "/dream-log",
+            "/dream-restore",
+            "/help",
+        }
+    )
     def __init__(self, config: AnonConfig) -> None:
         """初始化策略引擎."""
         self.config = config
@@ -48,20 +59,23 @@ class PolicyEngine:
         """判断发送者是否为超级管理员."""
         return message.sender_id in self.config.super_admins
 
-    def parse_command(self, message: NormalizedMessage) -> SlashCommand | None:
-        """从标准化文本中识别斜杠命令."""
+    def classify_slash_command(self, message: NormalizedMessage) -> str | None:
+        """按固定菜单识别允许透传的斜杠命令."""
         content = message.content.strip()
         if not content.startswith("/"):
             return None
 
-        parts = content[1:].split()
-        if not parts:
-            return None
-        if parts[0] == "admin":
-            if len(parts) < 2 or not self.is_super_admin(message):
-                return None
-            return SlashCommand(name=parts[1], args=parts[2:], admin_only=True)
-        return SlashCommand(name=parts[0], args=parts[1:], admin_only=False)
+        command = content.split(maxsplit=1)[0].lower()
+        if command in self._KNOWN_SLASH_COMMANDS:
+            return command
+        return None
+
+    def should_passthrough_slash_command(self, message: NormalizedMessage) -> bool:
+        """判断斜杠命令是否应按管理员直通上游."""
+        return (
+            self.classify_slash_command(message) is not None
+            and self.is_super_admin(message)
+        )
 
     def decide_trigger(
         self,

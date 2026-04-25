@@ -674,64 +674,9 @@ def test_kernel_marks_reply_to_self_from_context_before_policy() -> None:
     asyncio.run(case())
 
 
-def test_kernel_publishes_normal_slash_command_without_trigger_match() -> None:
-    """普通斜杠命令应直接进入总线, 不受触发策略阻断."""
-
-    async def case() -> None:
-        bus = MessageBus()
-        kernel = Kernel(
-            config=_config(
-                allow_from=["group:456"],
-                trigger_on_at=False,
-                trigger_on_reply=False,
-                group_trigger_prob=0.0,
-            ),
-            bus=bus,
-            transport=RecordingTransport(),
-        )
-
-        await kernel.handle_inbound(_group_message(content="/help status"))
-
-        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-
-        assert inbound.chat_id == "group:456"
-        assert inbound.metadata["trigger_reason"] == "slash_command"
-        assert inbound.metadata["command"] == {
-            "name": "help",
-            "args": ["status"],
-            "admin_only": False,
-        }
-        assert inbound.metadata["message"]["content"] == "/help status"
-
-    asyncio.run(case())
-
-
-def test_kernel_rejects_non_admin_slash_admin_command_at_runtime() -> None:
-    """非管理员的 admin 命令不应绕过运行时策略进入总线."""
-
-    async def case() -> None:
-        bus = MessageBus()
-        kernel = Kernel(
-            config=_config(
-                allow_from=["group:456"],
-                super_admins=["999"],
-                trigger_on_at=False,
-                trigger_on_reply=False,
-                group_trigger_prob=0.0,
-            ),
-            bus=bus,
-            transport=RecordingTransport(),
-        )
-
-        await kernel.handle_inbound(_group_message(content="/admin reload"))
-
-        assert bus.inbound_size == 0
-
-    asyncio.run(case())
-
-
-def test_kernel_publishes_admin_slash_command_for_super_admin() -> None:
-    """超级管理员的 admin 命令应在运行时被识别并投递."""
+def test_kernel_passthroughs_known_slash_command_for_super_admin_without_storing(
+) -> None:
+    """已知菜单命令遇到超级管理员时应直通总线、更新资料且不写入上下文."""
 
     async def case() -> None:
         bus = MessageBus()
@@ -747,15 +692,104 @@ def test_kernel_publishes_admin_slash_command_for_super_admin() -> None:
             transport=RecordingTransport(),
         )
 
-        await kernel.handle_inbound(_group_message(content="/admin reload now"))
+        message = _group_message(content="/help")
+        await kernel.handle_inbound(message)
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        profile = kernel.state.get_member_profile(
+            message.conversation,
+            message.sender_id,
+        )
+
+        assert inbound.chat_id == "group:456"
+        assert inbound.content == "/help"
+        assert inbound.metadata["trigger_reason"] == "slash_command"
+        assert inbound.metadata["message"]["content"] == "/help"
+        assert inbound.metadata["ctx_message_ids"] == []
+        assert inbound.metadata["ctx_count"] == 0
+        assert "command" not in inbound.metadata
+        assert profile is not None
+        assert profile.user_id == "123"
+        assert profile.display_name == "Alice"
+        assert profile.nickname == "Alice"
+        assert (
+            kernel.context_store.get_message(
+                message.conversation,
+                message.message_id,
+            )
+            is None
+        )
+
+    asyncio.run(case())
+
+
+def test_kernel_treats_known_slash_command_from_non_admin_as_normal_message() -> None:
+    """非管理员发送已知菜单命令时应按普通消息触发并写入上下文."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                super_admins=["999"],
+                trigger_on_at=False,
+                trigger_on_reply=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=RecordingTransport(),
+        )
+
+        message = _group_message(content="/help")
+        await kernel.handle_inbound(message)
 
         inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
 
-        assert inbound.metadata["trigger_reason"] == "slash_command"
-        assert inbound.metadata["command"] == {
-            "name": "reload",
-            "args": ["now"],
-            "admin_only": True,
-        }
+        assert inbound.metadata["trigger_reason"] == "group_probability"
+        assert inbound.metadata["message"]["content"] == "/help"
+        assert "command" not in inbound.metadata
+        assert (
+            kernel.context_store.get_message(
+                message.conversation,
+                message.message_id,
+            )
+            == message
+        )
+
+    asyncio.run(case())
+
+
+def test_kernel_treats_unknown_slash_command_as_normal_message() -> None:
+    """未知斜杠命令应按普通消息路径处理并写入上下文."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                super_admins=["123"],
+                trigger_on_at=False,
+                trigger_on_reply=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=RecordingTransport(),
+        )
+
+        message = _group_message(content="/foo")
+        await kernel.handle_inbound(message)
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert inbound.metadata["trigger_reason"] == "group_probability"
+        assert inbound.metadata["message"]["content"] == "/foo"
+        assert "command" not in inbound.metadata
+        assert (
+            kernel.context_store.get_message(
+                message.conversation,
+                message.message_id,
+            )
+            == message
+        )
 
     asyncio.run(case())

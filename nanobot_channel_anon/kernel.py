@@ -102,15 +102,12 @@ class Kernel:
         if not self.policy.is_allowed(message):
             return
 
-        await self.remember_message(message)
-        command = self.policy.parse_command(message)
-        if command is not None:
-            await self._publish_inbound(
-                message,
-                trigger_reason="slash_command",
-                command=command,
-            )
+        if self.policy.should_passthrough_slash_command(message):
+            self._update_member_profile(message)
+            await self._publish_passthrough_slash_command(message)
             return
+
+        await self.remember_message(message)
         decision = self.policy.decide_trigger(
             message,
             context=PolicyContext(self_id=self.state.self_id),
@@ -125,7 +122,6 @@ class Kernel:
         message: NormalizedMessage,
         *,
         trigger_reason: str,
-        command: BaseModel | None = None,
     ) -> None:
         """把当前上下文窗口投递到消息总线."""
         presented = self.presenter.present_recent_window(
@@ -142,8 +138,6 @@ class Kernel:
             "ctx_message_ids": list(presented.metadata.get("message_ids", [])),
             "ctx_count": presented.metadata.get("count", 0),
         }
-        if command is not None:
-            metadata["command"] = command.model_dump(mode="json")
         await self.bus.publish_inbound(
             InboundMessage(
                 channel="anon",
@@ -160,9 +154,34 @@ class Kernel:
         )
         self.context_store.mark_consumed(message.conversation, message.message_id)
 
+    async def _publish_passthrough_slash_command(
+        self,
+        message: NormalizedMessage,
+    ) -> None:
+        """把超级管理员的已知斜杠命令按原文直通总线."""
+        await self.bus.publish_inbound(
+            InboundMessage(
+                channel="anon",
+                sender_id=message.sender_id,
+                chat_id=message.conversation.key,
+                content=message.content,
+                media=[],
+                metadata={
+                    "message": message.model_dump(mode="json"),
+                    "trigger_reason": "slash_command",
+                    "ctx_message_ids": [],
+                    "ctx_count": 0,
+                },
+            )
+        )
+
     async def remember_message(self, message: NormalizedMessage) -> None:
         """把消息写入上下文与最小状态."""
         self.context_store.append(message)
+        self._update_member_profile(message)
+
+    def _update_member_profile(self, message: NormalizedMessage) -> None:
+        """更新发送者在当前会话中的资料快照."""
         self.state.set_member_profile(
             message.conversation,
             user_id=message.sender_id,
