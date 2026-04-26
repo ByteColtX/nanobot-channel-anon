@@ -84,6 +84,24 @@ class GroupMemberInfoFetcher(Protocol):
 
 
 @runtime_checkable
+class ForwardMessageFetcher(Protocol):
+    """支持按 forward_id 查询合并转发内容的传输层扩展."""
+
+    async def get_forward_message(self, forward_id: str) -> Any | None:
+        """按 forward_id 拉取合并转发原始载荷."""
+        ...
+
+
+@runtime_checkable
+class InboundForwardEnricher(Protocol):
+    """支持入站 forward 展开的运行时扩展."""
+
+    async def enrich(self, message: NormalizedMessage) -> NormalizedMessage:
+        """增强标准化入站消息中的 forward 信息."""
+        ...
+
+
+@runtime_checkable
 class InboundMediaEnricher(Protocol):
     """支持入站媒体增强的运行时扩展."""
 
@@ -106,6 +124,7 @@ class Kernel:
         context_store: ContextStore | None = None,
         policy: PolicyEngine | None = None,
         presenter: ContextPresenter | None = None,
+        inbound_forward_enricher: InboundForwardEnricher | None = None,
         inbound_media_enricher: InboundMediaEnricher | None = None,
     ) -> None:
         """初始化内核并保存依赖."""
@@ -123,6 +142,14 @@ class Kernel:
         )
         self.policy = policy or PolicyEngine(config)
         self.presenter = presenter or ContextPresenter()
+        if (
+            inbound_forward_enricher is None
+            and isinstance(transport, ForwardMessageFetcher)
+        ):
+            from nanobot_channel_anon.inbound_forward import InboundForwardEnricher
+
+            inbound_forward_enricher = InboundForwardEnricher(fetcher=transport)
+        self.inbound_forward_enricher = inbound_forward_enricher
         self.inbound_media_enricher = inbound_media_enricher
         self._running = False
 
@@ -163,6 +190,8 @@ class Kernel:
             return
 
         message, reply_target = await self._hydrate_message(message)
+        if self.inbound_forward_enricher is not None:
+            message = await self.inbound_forward_enricher.enrich(message)
         if self.inbound_media_enricher is not None:
             message = await self.inbound_media_enricher.enrich(message)
 

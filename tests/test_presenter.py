@@ -416,8 +416,8 @@ def test_present_recent_window_renders_poke_as_event_row() -> None:
     assert "E|notice:poke:1:456:123:42|u1" in rendered.text
 
 
-def test_present_recent_window_renders_expanded_forward_block() -> None:
-    """Expanded forward payload should render as a compact deterministic suffix."""
+def test_present_recent_window_renders_forward_container_rows() -> None:
+    """Expanded forward payload should render as M/F/N container rows."""
     store = ContextStore(max_messages_per_conversation=5)
     store.append(
         _message(
@@ -434,11 +434,14 @@ def test_present_recent_window_renders_expanded_forward_block() -> None:
                             ForwardNode(
                                 sender_id="1001",
                                 sender_name="张三",
+                                message_id="n0",
                                 content="第一条",
                             ),
                             ForwardNode(
                                 sender_id="1002",
                                 sender_name="李四",
+                                message_id="n1",
+                                reply_to_message_id="n0",
                                 content="第二条|含分隔符\n换行",
                             ),
                         ],
@@ -454,13 +457,67 @@ def test_present_recent_window_renders_expanded_forward_block() -> None:
         self_id="bot",
     )
 
-    expected_block = (
-        "M|m1|u1|看这个[forward] "
-        "[F:id=fw-1;summary=2条聊天记录;"
-        "nodes=1001/张三/第一条,1002/李四/第二条\\|含分隔符\\n换行]"
+    assert "M|m1|u1|看这个[F:f0]" in rendered.text
+    assert "F|f0|2|2条聊天记录" in rendered.text
+    assert "N|0|u2|第一条" in rendered.text
+    assert "N|1|u3|^0 第二条\\|含分隔符\\n换行" in rendered.text
+
+
+def test_present_recent_window_renders_forward_node_image_and_local_reply() -> None:
+    """Forward node image and local reply should render through shared media rules."""
+    store = ContextStore(max_messages_per_conversation=5)
+    store.append(
+        _message(
+            "m1",
+            sender_id="424155717",
+            sender_name="原",
+            content="[forward]",
+            metadata={
+                "forward_expanded": [
+                    ForwardExpanded(
+                        forward_id="fw-1",
+                        summary="",
+                        nodes=[
+                            ForwardNode(
+                                sender_id="1094950020",
+                                sender_name="囚心罪",
+                                message_id="node-3",
+                                content="🤔",
+                            ),
+                            ForwardNode(
+                                sender_id="123456",
+                                sender_name="香港奶龙",
+                                message_id="node-4",
+                                reply_to_message_id="node-3",
+                                content="[image]",
+                                attachments=[
+                                    Attachment(
+                                        kind="image",
+                                        url="https://example.com/image_name.png",
+                                        name="image_name.png",
+                                        metadata={"file_size": "123"},
+                                    )
+                                ],
+                            ),
+                        ],
+                    ).model_dump(exclude_none=True)
+                ]
+            },
+        )
     )
 
-    assert expected_block in rendered.text
+    rendered = ContextPresenter().present_recent_window(
+        store,
+        _conversation(),
+        self_id="1637649901",
+        self_name="千早奶龙",
+    )
+
+    assert "U|u2|1094950020|囚心罪" in rendered.text
+    assert "U|u3|123456|香港奶龙" in rendered.text
+    assert "I|i0|image_name.png" in rendered.text
+    assert "N|0|u2|🤔" in rendered.text
+    assert "N|1|u3|^0 [i0]" in rendered.text
 
 
 def test_present_recent_window_prefers_render_segments_for_mentions() -> None:
@@ -584,12 +641,11 @@ def test_present_recent_window_ignores_invalid_forward_metadata() -> None:
             "m1",
             sender_id="123",
             sender_name="Alice",
-            content="看这个[forward]",
+            content="看这个[forward][forward]",
             metadata={
                 "forward_expanded": [
                     {"forward_id": "fw-1", "summary": "ok", "nodes": []},
                     {"forward_id": "bad", "summary": 123, "nodes": "oops"},
-                    "skip-me",
                 ]
             },
         )
@@ -601,5 +657,6 @@ def test_present_recent_window_ignores_invalid_forward_metadata() -> None:
         self_id="bot",
     )
 
-    assert "[F:id=fw-1;summary=ok;nodes=]" in rendered.text
+    assert "M|m1|u1|看这个[F:f0][forward]" in rendered.text
+    assert "F|f0|0|ok" in rendered.text
     assert "bad" not in rendered.text

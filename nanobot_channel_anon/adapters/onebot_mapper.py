@@ -7,6 +7,7 @@ from typing import Any
 
 from nanobot_channel_anon.adapters.onebot_media import OneBotMediaAdapter
 from nanobot_channel_anon.domain import (
+    Attachment,
     ChannelSendRequest,
     ConversationRef,
     ForwardNode,
@@ -449,26 +450,7 @@ class OneBotMapper:
             for raw_node in nodes_data:
                 if not isinstance(raw_node, dict):
                     continue
-                node = OneBotMapper._unwrap_forward_node(raw_node)
-                nodes.append(
-                    ForwardNode(
-                        sender_id=_string_value(
-                            node.get("user_id")
-                            or node.get("uin")
-                            or node.get("sender_id")
-                        )
-                        or "",
-                        sender_name=_string_value(
-                            node.get("nickname")
-                            or node.get("name")
-                            or node.get("sender_name")
-                        )
-                        or "",
-                        content=OneBotMapper._stringify_forward_content(
-                            node.get("content")
-                        ),
-                    )
-                )
+                nodes.append(OneBotMapper.build_forward_node(raw_node))
         return ForwardRef(
             forward_id=_string_value(
                 forward_data.get("id") or forward_data.get("forward_id")
@@ -478,47 +460,124 @@ class OneBotMapper:
         ).model_dump(exclude_none=True)
 
     @staticmethod
+    def build_forward_node(node: dict[str, Any]) -> ForwardNode:
+        """构建一条可渲染的浅层转发节点."""
+        raw_node = OneBotMapper._unwrap_forward_node(node)
+        content_source = (
+            raw_node.get("content")
+            if raw_node.get("content") is not None
+            else raw_node.get("message")
+        )
+        text_content, attachments = OneBotMapper._parse_forward_content(
+            content_source
+        )
+        outer_sender_raw = node.get("sender")
+        outer_sender: dict[str, Any] = (
+            outer_sender_raw if isinstance(outer_sender_raw, dict) else {}
+        )
+        inner_sender_raw = raw_node.get("sender")
+        inner_sender: dict[str, Any] = (
+            inner_sender_raw if isinstance(inner_sender_raw, dict) else {}
+        )
+        sender_id = normalize_onebot_id(
+            raw_node.get("user_id")
+            or raw_node.get("uin")
+            or raw_node.get("sender_id")
+            or node.get("user_id")
+            or node.get("uin")
+            or node.get("sender_id")
+            or inner_sender.get("user_id")
+            or outer_sender.get("user_id")
+        )
+        sender_name = (
+            _string_value(raw_node.get("nickname"))
+            or _string_value(raw_node.get("name"))
+            or _string_value(raw_node.get("sender_name"))
+            or _string_value(node.get("nickname"))
+            or _string_value(node.get("name"))
+            or _string_value(node.get("sender_name"))
+            or _string_value(inner_sender.get("card"))
+            or _string_value(inner_sender.get("nickname"))
+            or _string_value(outer_sender.get("card"))
+            or _string_value(outer_sender.get("nickname"))
+            or sender_id
+            or ""
+        )
+        return ForwardNode(
+            sender_id=sender_id or "",
+            sender_name=sender_name,
+            message_id=normalize_onebot_id(
+                raw_node.get("message_id")
+                or raw_node.get("id")
+                or node.get("message_id")
+                or node.get("id")
+            ),
+            reply_to_message_id=OneBotMapper._forward_reply_to_message_id(raw_node),
+            content=text_content,
+            attachments=attachments,
+        )
+
+    @staticmethod
     def _unwrap_forward_node(node: dict[str, Any]) -> dict[str, Any]:
         raw_data = node.get("data")
-        if node.get("type") == "node" and isinstance(raw_data, dict):
+        if isinstance(raw_data, dict):
             return raw_data
         return node
 
     @staticmethod
-    def _stringify_forward_content(content: Any) -> str:
+    def _forward_reply_to_message_id(node: dict[str, Any]) -> str | None:
+        content = (
+            node.get("content")
+            if node.get("content") is not None
+            else node.get("message")
+        )
+        for segment in OneBotMapper._segments_from_message(content):
+            if segment.type != "reply":
+                continue
+            return normalize_onebot_id(
+                segment.data.get("id") or segment.data.get("message_id")
+            )
+        return None
+
+    @staticmethod
+    def _parse_forward_content(content: Any) -> tuple[str, list[Attachment]]:
         if content is None:
-            return ""
+            return "", []
         if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, OneBotMessageSegment):
-                    item_type = item.type
-                    item_data = item.data
-                elif isinstance(item, dict):
-                    item_type = _string_value(item.get("type")) or ""
-                    raw_data = item.get("data")
-                    item_data = raw_data if isinstance(raw_data, dict) else {}
-                else:
-                    continue
-                if item_type == "text":
-                    text = _string_value(item_data.get("text")) or ""
-                    parts.append(text)
-                elif item_type == "forward":
-                    parts.append("[forward]")
-                elif item_type == "reply":
-                    continue
-                else:
-                    attachment_kind = OneBotMediaAdapter().classify_segment_type(
-                        item_type
-                    )
-                    if attachment_kind in {"image", "voice", "video", "file"}:
-                        parts.append(
-                            OneBotMapper._placeholder_for_attachment(attachment_kind)
-                        )
-            return "".join(parts).strip()
-        return _string_value(content) or ""
+            return content.strip(), []
+        if not isinstance(content, list):
+            return _string_value(content) or "", []
+
+        parts: list[str] = []
+        attachments: list[Attachment] = []
+        media_adapter = OneBotMediaAdapter()
+        for item in content:
+            if isinstance(item, OneBotMessageSegment):
+                segment = item
+            elif isinstance(item, dict):
+                segment = OneBotMessageSegment.model_validate(item)
+            else:
+                continue
+            if segment.type == "text":
+                text = _string_value(segment.data.get("text")) or ""
+                parts.append(text)
+                continue
+            if segment.type == "reply":
+                continue
+            if segment.type == "forward":
+                parts.append("[forward]")
+                continue
+            attachment = media_adapter.extract_inbound_attachment(segment)
+            if attachment is None:
+                continue
+            attachments.append(attachment)
+            parts.append(OneBotMapper._placeholder_for_attachment(attachment.kind))
+        return "".join(parts).strip(), attachments
+
+    @staticmethod
+    def _stringify_forward_content(content: Any) -> str:
+        text, _ = OneBotMapper._parse_forward_content(content)
+        return text
 
     @staticmethod
     def _segments_from_message(

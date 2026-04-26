@@ -13,7 +13,6 @@ from nanobot_channel_anon.domain import (
     Attachment,
     ConversationRef,
     ForwardExpanded,
-    ForwardNode,
     NormalizedMessage,
     PresentedConversation,
 )
@@ -236,7 +235,7 @@ class _CTXBuilder:
                 message.sender_name,
                 is_bot=message.from_self,
             )
-            body = self._render_message_body(message, media)
+            body, forward_rows = self._render_message_body(message, media)
             body_rows.append(
                 "|".join(
                     (
@@ -247,6 +246,7 @@ class _CTXBuilder:
                     )
                 )
             )
+            body_rows.extend(forward_rows)
 
         rows.extend(self._render_user_rows())
         rows.extend(self._render_image_rows())
@@ -330,8 +330,8 @@ class _CTXBuilder:
         self,
         message: NormalizedMessage,
         media: list[dict[str, str]],
-    ) -> str:
-        """渲染单条消息体."""
+    ) -> tuple[str, list[str]]:
+        """渲染单条消息体及其 forward 容器行."""
         body = self._render_message_body_from_segments(message, media)
         if body is None:
             body = message.content
@@ -342,8 +342,12 @@ class _CTXBuilder:
                 body = self._replace_first_placeholder(body, token, attachment.kind)
         if message.reply_to_message_id:
             body = f"^{message.reply_to_message_id} {body}".strip()
-        body = self._append_forward_block(body, message)
-        return self._truncate_message_body(body.strip())
+        body, forward_rows = self._render_forward_containers(
+            body.strip(),
+            message,
+            media,
+        )
+        return self._truncate_message_body(body), forward_rows
 
     def _render_message_body_from_segments(
         self,
@@ -559,56 +563,115 @@ class _CTXBuilder:
         """返回转写是否失败."""
         return attachment.metadata.get("transcription_status") == "failed"
 
-    def _append_forward_block(self, body: str, message: NormalizedMessage) -> str:
-        """在消息体后追加紧凑转发展开块."""
-        expanded = self._forward_expanded_from_metadata(message.metadata)
-        if not expanded:
-            return body
-        blocks = [self._render_forward_block(item) for item in expanded]
-        suffix = " ".join(blocks)
-        return f"{body} {suffix}".strip() if body else suffix
+    def _render_forward_containers(
+        self,
+        body: str,
+        message: NormalizedMessage,
+        media: list[dict[str, str]],
+    ) -> tuple[str, list[str]]:
+        """把消息体中的 forward 占位替换为容器引用, 并生成 F/N 行."""
+        slots = self._forward_expanded_slots_from_metadata(message.metadata)
+        if not slots or "[forward]" not in body:
+            return body, []
+
+        parts = body.split("[forward]")
+        rebuilt = [parts[0]]
+        rows: list[str] = []
+        forward_index = 0
+        for occurrence_index, tail in enumerate(parts[1:]):
+            expanded = (
+                slots[occurrence_index]
+                if occurrence_index < len(slots)
+                else None
+            )
+            if expanded is None:
+                rebuilt.append("[forward]")
+            else:
+                fid = f"f{forward_index}"
+                forward_index += 1
+                rebuilt.append(f"[F:{fid}]")
+                rows.extend(self._render_forward_container_rows(fid, expanded, media))
+            rebuilt.append(tail)
+        return "".join(rebuilt), rows
 
     @staticmethod
-    def _forward_expanded_from_metadata(
+    def _forward_expanded_slots_from_metadata(
         metadata: dict[str, object],
-    ) -> list[ForwardExpanded]:
+    ) -> list[ForwardExpanded | None]:
         raw_items = metadata.get("forward_expanded")
         if not isinstance(raw_items, list):
             return []
-        expanded: list[ForwardExpanded] = []
+        expanded: list[ForwardExpanded | None] = []
         for item in raw_items:
+            if item is None:
+                expanded.append(None)
+                continue
             if isinstance(item, ForwardExpanded):
                 expanded.append(item)
                 continue
             if not isinstance(item, dict):
+                expanded.append(None)
                 continue
             try:
                 expanded.append(ForwardExpanded.model_validate(item))
             except ValidationError:
-                continue
+                expanded.append(None)
         return expanded
 
-    def _render_forward_block(self, expanded: ForwardExpanded) -> str:
-        forward_id = self._escape_forward_field(expanded.forward_id or "")
-        summary = self._escape_forward_field(expanded.summary)
-        nodes = ",".join(self._render_forward_node(node) for node in expanded.nodes)
-        return f"[F:id={forward_id};summary={summary};nodes={nodes}]"
-
-    def _render_forward_node(self, node: ForwardNode) -> str:
-        sender_id = self._escape_forward_field(node.sender_id)
-        sender_name = self._escape_forward_field(node.sender_name)
-        content = self._escape_forward_field(node.content)
-        return "/".join((sender_id, sender_name, content))
-
-    @staticmethod
-    def _escape_forward_field(value: str) -> str:
-        return (
-            value.replace("\\", "\\\\")
-            .replace("/", "\\/")
-            .replace(",", "\\,")
-            .replace(";", "\\;")
-            .replace("=", "\\=")
-        )
+    def _render_forward_container_rows(
+        self,
+        fid: str,
+        expanded: ForwardExpanded,
+        media: list[dict[str, str]],
+    ) -> list[str]:
+        rows = [
+            "|".join(
+                (
+                    "F",
+                    fid,
+                    str(len(expanded.nodes)),
+                    self._escape(expanded.summary),
+                )
+            )
+        ]
+        node_index_by_message_id = {
+            node.message_id: index
+            for index, node in enumerate(expanded.nodes)
+            if node.message_id
+        }
+        for index, node in enumerate(expanded.nodes):
+            node_uid = self._ensure_user(
+                node.sender_id,
+                node.sender_name,
+                is_bot=node.sender_id == self.self_id,
+            )
+            reply_prefix = ""
+            if node.reply_to_message_id is not None:
+                reply_index = node_index_by_message_id.get(node.reply_to_message_id)
+                if reply_index is not None and reply_index < index:
+                    reply_prefix = f"^{reply_index} "
+            node_body = f"{reply_prefix}{node.content}".strip()
+            for attachment in node.attachments:
+                token = self._render_attachment_token(attachment, media)
+                if token is None:
+                    continue
+                node_body = self._replace_first_placeholder(
+                    node_body,
+                    token,
+                    attachment.kind,
+                )
+            node_body = self._truncate_message_body(node_body)
+            rows.append(
+                "|".join(
+                    (
+                        "N",
+                        str(index),
+                        node_uid,
+                        self._escape(node_body),
+                    )
+                )
+            )
+        return rows
 
     @staticmethod
     def _replace_first_placeholder(body: str, token: str, kind: str) -> str:

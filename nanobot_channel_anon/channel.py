@@ -12,6 +12,7 @@ from nanobot.channels.base import BaseChannel
 from nanobot_channel_anon.adapters.onebot_state import OneBotStateAdapter
 from nanobot_channel_anon.adapters.onebot_transport import OneBotTransport
 from nanobot_channel_anon.config import AnonConfig
+from nanobot_channel_anon.inbound_forward import InboundForwardEnricher
 from nanobot_channel_anon.inbound_media import InboundMediaEnricher
 from nanobot_channel_anon.kernel import Kernel
 
@@ -77,6 +78,7 @@ class AnonChannel(BaseChannel):
         """构建默认内核实例."""
         state = OneBotStateAdapter()
         transport = OneBotTransport(config=config, bus=bus, state=state)
+        inbound_forward_enricher = InboundForwardEnricher(fetcher=transport)
         inbound_media_enricher = InboundMediaEnricher(
             config=config,
             transcribe_audio=self.transcribe_audio,
@@ -86,5 +88,6 @@ class AnonChannel(BaseChannel):
             bus=bus,
             transport=transport,
             state=state,
+            inbound_forward_enricher=inbound_forward_enricher,
             inbound_media_enricher=inbound_media_enricher,
         )

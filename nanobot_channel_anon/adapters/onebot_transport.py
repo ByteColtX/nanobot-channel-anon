@@ -319,6 +319,16 @@ class OneBotTransport:
             }
         )
 
+    async def get_forward_message(self, forward_id: str) -> Any | None:
+        """按 forward_id 拉取合并转发的原始节点载荷."""
+        response = await self._send_api_request(
+            "get_forward_msg",
+            {"id": forward_id},
+        )
+        if response.status == "failed" or str(response.retcode or "") not in {"", "0"}:
+            return None
+        return response.data
+
     async def get_group_member_info(
         self,
         group_id: str,

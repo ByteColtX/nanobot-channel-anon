@@ -333,6 +333,36 @@ def test_map_group_message_preserves_wrapped_forward_nodes() -> None:
     ]
 
 
+def test_build_forward_node_preserves_outer_sender_image_and_reply() -> None:
+    """Forward node should keep sender, image, and local reply info."""
+    node = OneBotMapper.build_forward_node(
+        {
+            "sender": {"user_id": "123456", "nickname": "香港奶龙"},
+            "message_id": "node-4",
+            "content": [
+                {"type": "reply", "data": {"id": "node-3"}},
+                {
+                    "type": "image",
+                    "data": {
+                        "file": "image_name.png",
+                        "url": "https://example.com/image_name.png",
+                    },
+                },
+            ],
+        }
+    )
+
+    assert node.sender_id == "123456"
+    assert node.sender_name == "香港奶龙"
+    assert node.message_id == "node-4"
+    assert node.reply_to_message_id == "node-3"
+    assert node.content == "[image]"
+    assert len(node.attachments) == 1
+    assert node.attachments[0].kind == "image"
+    assert node.attachments[0].url == "https://example.com/image_name.png"
+    assert node.attachments[0].name == "image_name.png"
+
+
 def test_map_outbound_request_keeps_image_mixed_with_text() -> None:
     """图片可与文本共用同一个 OneBot 发送请求."""
     mapper = OneBotMapper(self_id="42")

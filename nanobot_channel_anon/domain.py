@@ -40,7 +40,16 @@ class ForwardNode(BaseModel):
 
     sender_id: str = Field(default="", description="节点发送者 ID。")
     sender_name: str = Field(default="", description="节点发送者显示名。")
+    message_id: str | None = Field(default=None, description="节点消息 ID。")
+    reply_to_message_id: str | None = Field(
+        default=None,
+        description="节点回复目标消息 ID。",
+    )
     content: str = Field(default="", description="节点正文的稳定文本。")
+    attachments: list[Attachment] = Field(
+        default_factory=list,
+        description="节点内按顺序出现的附件。",
+    )
 
 
 class ForwardRef(BaseModel):

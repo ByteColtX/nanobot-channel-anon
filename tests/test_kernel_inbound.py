@@ -58,6 +58,8 @@ class RecordingTransport:
         self.requests: list[list[dict[str, object]]] = []
         self.fetched_messages: dict[str, OneBotRawEvent] = {}
         self.get_message_calls: list[str] = []
+        self.forward_messages: dict[str, object] = {}
+        self.get_forward_message_calls: list[str] = []
         self.group_member_profiles: dict[tuple[str, str], dict[str, str]] = {}
         self.get_group_member_info_calls: list[tuple[str, str]] = []
 
@@ -78,6 +80,11 @@ class RecordingTransport:
         """按消息 ID 返回预置的回查结果."""
         self.get_message_calls.append(message_id)
         return self.fetched_messages.get(message_id)
+
+    async def get_forward_message(self, forward_id: str) -> object | None:
+        """按 forward_id 返回预置的合并转发载荷."""
+        self.get_forward_message_calls.append(forward_id)
+        return self.forward_messages.get(forward_id)
 
     async def get_group_member_info(
         self,
@@ -1280,6 +1287,166 @@ def test_kernel_falls_back_to_user_id_when_group_member_info_missing() -> None:
 
         assert transport.get_group_member_info_calls == [("456", "1003")]
         assert "U|u2|1003|1003" in inbound.content
+
+    asyncio.run(case())
+
+
+def test_kernel_renders_forward_container_rows_from_fetcher() -> None:
+    """入站 forward 应通过 get_forward_msg 恢复为 M/F/N 容器."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        transport = RecordingTransport()
+        transport.forward_messages["fw-1"] = {
+            "messages": [
+                {
+                    "data": {
+                        "message_id": "node-1",
+                        "user_id": "1001",
+                        "nickname": "张三",
+                        "content": [{"type": "text", "data": {"text": "第一条"}}],
+                    }
+                },
+                {
+                    "data": {
+                        "message_id": "node-2",
+                        "user_id": "1002",
+                        "nickname": "李四",
+                        "content": [
+                            {"type": "reply", "data": {"id": "node-1"}},
+                            {"type": "text", "data": {"text": "第二条"}},
+                            {"type": "forward", "data": {"id": "nested-1"}},
+                        ],
+                    }
+                },
+            ]
+        }
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=transport,
+        )
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="user-forward-1",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="123",
+                sender_name="Alice",
+                content="看这个[forward]",
+                metadata={
+                    "forwards": [
+                        {
+                            "forward_id": "fw-1",
+                            "summary": "聊天记录",
+                            "nodes": [],
+                        }
+                    ],
+                    "render_segments": [
+                        {"type": "text", "text": "看这个"},
+                        {"type": "forward"},
+                    ],
+                },
+            )
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert transport.get_forward_message_calls == ["fw-1"]
+        assert "M|user-forward-1|u1|看这个[F:f0]" in inbound.content
+        assert "F|f0|2|聊天记录" in inbound.content
+        assert "N|0|u2|第一条" in inbound.content
+        assert "N|1|u3|^0 第二条[forward]" in inbound.content
+
+    asyncio.run(case())
+
+
+def test_kernel_forward_fetcher_preserves_outer_sender_image_and_local_reply() -> None:
+    """真实 forward 节点应保留外层 sender、图片与局部 reply 关系."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        transport = RecordingTransport()
+        transport.forward_messages["fw-2"] = {
+            "messages": [
+                {
+                    "data": {
+                        "message_id": "node-3",
+                        "user_id": "1094950020",
+                        "nickname": "囚心罪",
+                        "content": [{"type": "text", "data": {"text": "🤔"}}],
+                    }
+                },
+                {
+                    "sender": {"user_id": "123456", "nickname": "香港奶龙"},
+                    "message_id": "node-4",
+                    "content": [
+                        {"type": "reply", "data": {"id": "node-3"}},
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "image_name.png",
+                                "url": "https://example.com/image_name.png",
+                                "file_size": "123",
+                            },
+                        },
+                    ],
+                },
+                {
+                    "data": {
+                        "message_id": "node-5",
+                        "user_id": "424155717",
+                        "nickname": "原",
+                        "content": [
+                            {"type": "reply", "data": {"id": "node-4"}},
+                            {"type": "text", "data": {"text": "缓外引用测试 other"}},
+                        ],
+                    }
+                },
+            ]
+        }
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=transport,
+        )
+        kernel.state.set_self_profile(user_id="1637649901", nickname="千早奶龙")
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="763685243",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="424155717",
+                sender_name="原",
+                content="[forward]",
+                metadata={
+                    "forwards": [
+                        {
+                            "forward_id": "fw-2",
+                            "summary": "",
+                            "nodes": [],
+                        }
+                    ],
+                    "render_segments": [{"type": "forward"}],
+                },
+            )
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert "U|u3|123456|香港奶龙" in inbound.content
+        assert "I|i0|image_name.png" in inbound.content
+        assert "N|0|u2|🤔" in inbound.content
+        assert "N|1|u3|^0 [i0]" in inbound.content
+        assert "N|2|u1|^1 缓外引用测试 other" in inbound.content
 
     asyncio.run(case())
 
