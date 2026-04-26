@@ -108,6 +108,15 @@ class _FakeClientSession:
         return _FakeResponse(self._body)
 
 
+class _FakeFFmpegProcess:
+    def __init__(self, *, returncode: int, stderr: bytes = b"") -> None:
+        self.returncode = returncode
+        self._stderr = stderr
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return b"", self._stderr
+
+
 def test_enricher_filters_video_and_file_only_message() -> None:
     """纯视频/文件消息应被标记为可抑制."""
     enricher = StubInboundMediaEnricher(config=_config())
@@ -186,7 +195,7 @@ def test_enricher_marks_failed_voice_transcription() -> None:
         transcribe_audio=_transcribe_empty,
     )
     enricher.materialized = (Path("/tmp/voice.amr"), {"file_size": "123"})
-    enricher.transcode_result = Path("/tmp/voice.wav")
+    enricher.transcode_result = Path("/tmp/voice.ogg")
     message = _message(
         content="听一下[voice]",
         attachments=[
@@ -206,7 +215,7 @@ def test_enricher_marks_failed_voice_transcription() -> None:
     )
     assert attachment.metadata["download_status"] == "downloaded"
     assert attachment.metadata["transcoded"] is True
-    assert transcription_path.name == "voice.wav"
+    assert transcription_path.name == "voice.ogg"
     assert (
         transcription_path.as_uri()
         == attachment.metadata["transcription_input_local_file_uri"]
@@ -221,7 +230,7 @@ def test_enricher_records_successful_voice_transcription() -> None:
         transcribe_audio=_transcribe_ok,
     )
     enricher.materialized = (Path("/tmp/voice.amr"), {"file_size": "123"})
-    enricher.transcode_result = Path("/tmp/voice.wav")
+    enricher.transcode_result = Path("/tmp/voice.ogg")
     message = _message(
         content="听一下[voice]",
         attachments=[
@@ -353,6 +362,40 @@ def test_enricher_keeps_valid_forward_expanded_slot_when_mixed_with_invalid() ->
     assert rendered_slots[1] is None
 
 
+def test_transcode_voice_deletes_source_file_after_success() -> None:
+    """Ffmpeg 成功转码后应删除原始语音文件."""
+    enricher = InboundMediaEnricher(config=_config())
+
+    with TemporaryDirectory() as tmpdir:
+        source_path = Path(tmpdir) / "voice.amr"
+        target_path = Path(tmpdir) / "voice.ogg"
+        source_path.write_bytes(b"amr")
+        original_create_subprocess_exec = asyncio.create_subprocess_exec
+        received_args: tuple[object, ...] = ()
+
+        async def fake_create_subprocess_exec(*args, **kwargs) -> _FakeFFmpegProcess:
+            nonlocal received_args
+            _ = kwargs
+            received_args = args
+            target_path.write_bytes(b"ogg")
+            return _FakeFFmpegProcess(returncode=0)
+
+        try:
+            asyncio.create_subprocess_exec = fake_create_subprocess_exec  # type: ignore[assignment]
+            transcoded_path = asyncio.run(
+                enricher._transcode_voice_for_transcription(source_path)
+            )
+        finally:
+            asyncio.create_subprocess_exec = original_create_subprocess_exec  # type: ignore[assignment]
+
+        assert transcoded_path == target_path
+        assert target_path.suffix == ".ogg"
+        assert target_path.read_bytes() == b"ogg"
+        assert "libopus" in received_args
+        assert str(target_path) in received_args
+        assert not source_path.exists()
+
+
 def test_materialize_attachment_reuses_existing_cache_when_file_exists() -> None:
     """已有同名缓存文件时应直接复用, 不再下载."""
     enricher = InboundMediaEnricher(config=_config())
@@ -426,6 +469,56 @@ def test_materialize_attachment_downloads_when_named_cache_missing() -> None:
         "original_file": "A9381FD36555D392AA81D0F1B5B38AAF.jpg",
     }
     assert calls == ["https://example.com/media/a.png"]
+
+
+def test_materialize_attachment_prefers_remote_url_over_original_path() -> None:
+    """存在远端 url 时应直接下载, 不依赖原始本地 path."""
+    enricher = InboundMediaEnricher(config=_config())
+    source_url = "https://multimedia.nt.qq.com.cn/download?fileid=abc"
+    original_path = (
+        "/app/.config/QQ/nt_qq_xxx/nt_data/Ptt/2026-04/Ori/"
+        "8bdd66d4dba9333275ff10356938b2c5.amr"
+    )
+    attachment = Attachment(
+        kind="voice",
+        url=source_url,
+        name="8bdd66d4dba9333275ff10356938b2c5.amr",
+        metadata={
+            "file_size": "4",
+            "original_file": "8bdd66d4dba9333275ff10356938b2c5.amr",
+            "original_path": original_path,
+            "original_url": source_url,
+        },
+    )
+
+    with TemporaryDirectory() as tmpdir:
+        cached_path = Path(tmpdir) / "8bdd66d4dba9333275ff10356938b2c5.amr"
+        calls: list[str] = []
+        original_cache_path = enricher._cache_path
+        original_client_session = aiohttp.ClientSession
+        try:
+            enricher._cache_path = lambda _attachment: cached_path  # type: ignore[method-assign]
+            aiohttp.ClientSession = lambda: _FakeClientSession(  # type: ignore[assignment]
+                b"amr!",
+                calls,
+            )
+            local_path, metadata = asyncio.run(
+                enricher._materialize_attachment(attachment)
+            )
+        finally:
+            enricher._cache_path = original_cache_path  # type: ignore[method-assign]
+            aiohttp.ClientSession = original_client_session  # type: ignore[assignment]
+
+        assert cached_path.read_bytes() == b"amr!"
+
+    assert local_path == cached_path
+    assert metadata == {
+        "file_size": "4",
+        "original_file": "8bdd66d4dba9333275ff10356938b2c5.amr",
+        "original_path": original_path,
+        "original_url": source_url,
+    }
+    assert calls == [source_url]
 
 
 def test_cache_path_uses_message_file_name_directly() -> None:

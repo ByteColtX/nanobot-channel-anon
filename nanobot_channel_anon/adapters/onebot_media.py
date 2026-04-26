@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlparse
 
 from nanobot_channel_anon.domain import Attachment
 from nanobot_channel_anon.onebot import OneBotMessageSegment
+from nanobot_channel_anon.utils import normalize_scalar_string
 
 _SEGMENT_TO_ATTACHMENT_KIND = {
     "image": "image",
@@ -29,18 +30,6 @@ _VOICE_SUFFIXES = (
 _VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".webm", ".avi")
 
 
-def _string_value(value: Any) -> str | None:
-    """把段数据里的标量值规范化为非空字符串."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        normalized = value.strip()
-        return normalized or None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return str(value)
-    return None
-
-
 class OneBotMediaAdapter:
     """集中处理 OneBot 媒体识别与段转换."""
 
@@ -55,7 +44,7 @@ class OneBotMediaAdapter:
     def resolve_media_ref(self, data: dict[str, Any]) -> str | None:
         """从 OneBot 段数据中提取稳定媒体引用."""
         for key in ("url", "file", "path"):
-            value = _string_value(data.get(key))
+            value = normalize_scalar_string(data.get(key))
             if value is not None:
                 return value
         return None
@@ -73,21 +62,21 @@ class OneBotMediaAdapter:
         if media_ref is None:
             return None
 
-        name = _string_value(segment.data.get("file")) or ""
+        name = normalize_scalar_string(segment.data.get("file")) or ""
         metadata = {
             "source": "message_segment",
             "onebot_segment_type": segment.type,
         }
-        original_url = _string_value(segment.data.get("url"))
+        original_url = normalize_scalar_string(segment.data.get("url"))
         if original_url is not None:
             metadata["original_url"] = original_url
-        original_file = _string_value(segment.data.get("file"))
+        original_file = normalize_scalar_string(segment.data.get("file"))
         if original_file is not None:
             metadata["original_file"] = original_file
-        original_path = _string_value(segment.data.get("path"))
+        original_path = normalize_scalar_string(segment.data.get("path"))
         if original_path is not None:
             metadata["original_path"] = original_path
-        file_size = _string_value(segment.data.get("file_size"))
+        file_size = normalize_scalar_string(segment.data.get("file_size"))
         if file_size is not None:
             metadata["file_size"] = file_size
         return Attachment(

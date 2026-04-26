@@ -1771,7 +1771,7 @@ def test_kernel_publishes_enriched_image_and_voice_media_refs() -> None:
                     name="voice.amr",
                     metadata={
                         "local_file_uri": "file:///tmp/voice.amr",
-                        "transcription_input_local_file_uri": "file:///tmp/voice.wav",
+                        "transcription_input_local_file_uri": "file:///tmp/voice.ogg",
                         "transcription_status": "success",
                         "transcription_text": "你好",
                     },
@@ -1805,9 +1805,9 @@ def test_kernel_publishes_enriched_image_and_voice_media_refs() -> None:
         inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
 
         assert enricher.calls == ["user-media"]
-        assert inbound.media == ["/tmp/a-local.png", "file:///tmp/voice.wav"]
+        assert inbound.media == ["/tmp/a-local.png", "file:///tmp/voice.ogg"]
         assert "I|i0|a.png" in inbound.content
-        assert "V|v0|voice.wav|=你好" in inbound.content
+        assert "V|v0|voice.ogg|=你好" in inbound.content
 
     asyncio.run(case())
 

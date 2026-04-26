@@ -15,7 +15,10 @@ from nanobot.config.paths import get_media_dir
 from nanobot_channel_anon.adapters.onebot_media import OneBotMediaAdapter
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.domain import Attachment, ForwardNode, NormalizedMessage
-from nanobot_channel_anon.utils import parse_forward_expanded_item
+from nanobot_channel_anon.utils import (
+    attachment_placeholder,
+    parse_forward_expanded_item,
+)
 
 _MEDIA_DOWNLOAD_TIMEOUT_S = 30.0
 _FFMPEG_TIMEOUT_S = 30.0
@@ -287,19 +290,18 @@ class InboundMediaEnricher:
     ) -> tuple[Path | None, dict[str, object]]:
         """将可处理附件物化为本地文件."""
         metadata = dict(attachment.metadata)
-        local_source = self._local_source_path(attachment)
-        if local_source is not None:
-            if not local_source.exists():
-                return None, self._with_download_status(
-                    metadata,
-                    "missing_local_source",
-                )
-            if not self._is_within_size_limit(local_source.stat().st_size):
-                return None, self._with_download_status(metadata, "skipped_size")
-            return local_source, metadata
-
         source_url = self._source_url(attachment)
         if source_url is None:
+            local_source = self._local_source_path(attachment)
+            if local_source is not None:
+                if not local_source.exists():
+                    return None, self._with_download_status(
+                        metadata,
+                        "missing_local_source",
+                    )
+                if not self._is_within_size_limit(local_source.stat().st_size):
+                    return None, self._with_download_status(metadata, "skipped_size")
+                return local_source, metadata
             return None, self._with_download_status(metadata, "missing_url")
 
         file_size = self._attachment_file_size(attachment)
@@ -356,7 +358,7 @@ class InboundMediaEnricher:
         if suffix in _SUPPORTED_TRANSCRIPTION_SUFFIXES:
             return source_path
 
-        target_path = source_path.with_suffix(".wav")
+        target_path = source_path.with_suffix(".ogg")
         if target_path.exists():
             return target_path
 
@@ -367,12 +369,18 @@ class InboundMediaEnricher:
                 "-i",
                 str(source_path),
                 "-vn",
-                "-acodec",
-                "pcm_s16le",
-                "-ar",
-                "16000",
                 "-ac",
                 "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "24k",
+                "-vbr",
+                "on",
+                "-application",
+                "voip",
                 str(target_path),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
@@ -412,6 +420,8 @@ class InboundMediaEnricher:
                 stderr.decode("utf-8", errors="ignore").strip(),
             )
             return None
+        with contextlib.suppress(FileNotFoundError):
+            source_path.unlink()
         return target_path
 
     @staticmethod
@@ -432,11 +442,8 @@ class InboundMediaEnricher:
             if segment_type == "text":
                 content_parts.append(segment.get("text", ""))
                 continue
-            if segment_type == "image":
-                content_parts.append("[image]")
-                continue
-            if segment_type == "voice":
-                content_parts.append("[voice]")
+            if segment_type in {"image", "voice"}:
+                content_parts.append(attachment_placeholder(segment_type))
                 continue
             if segment_type == "forward":
                 content_parts.append("[forward]")

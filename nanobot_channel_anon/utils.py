@@ -21,6 +21,45 @@ def normalize_onebot_id(value: Any) -> str | None:
     return None
 
 
+def normalize_scalar_string(value: Any) -> str | None:
+    """把协议层标量值规范化为非空字符串."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    if isinstance(value, (int, float)):
+        return str(value)
+    return None
+
+
+def parse_cq_params(params_raw: str) -> dict[str, str]:
+    """解析 CQ 参数串为键值对."""
+    if not params_raw:
+        return {}
+    params: dict[str, str] = {}
+    for part in params_raw.split(","):
+        key, separator, value = part.partition("=")
+        if not separator:
+            return {}
+        normalized_key = key.strip()
+        if not normalized_key:
+            return {}
+        params[normalized_key] = value
+    return params
+
+
+def attachment_placeholder(kind: str) -> str:
+    """返回标准附件占位符."""
+    placeholder_map = {
+        "image": "[image]",
+        "voice": "[voice]",
+        "video": "[video]",
+        "file": "[file]",
+    }
+    return placeholder_map.get(kind, "[file]")
+
+
 def parse_forward_expanded_item(raw_item: object) -> ForwardExpanded | None:
     """把 metadata 中的单个 forward_expanded 槽位解析成模型."""
     if raw_item is None:

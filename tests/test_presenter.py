@@ -425,7 +425,7 @@ def test_present_recent_window_renders_voice_row_with_transcription() -> None:
                     name="voice.amr",
                     metadata={
                         "local_file_uri": "file:///tmp/voice.amr",
-                        "transcription_input_local_file_uri": "file:///tmp/voice.wav",
+                        "transcription_input_local_file_uri": "file:///tmp/voice.ogg",
                         "transcription_status": "success",
                         "transcription_text": "你好世界",
                     },
@@ -440,9 +440,9 @@ def test_present_recent_window_renders_voice_row_with_transcription() -> None:
         self_id="bot",
     )
 
-    assert "V|v0|voice.wav|=你好世界" in rendered.text
+    assert "V|v0|voice.ogg|=你好世界" in rendered.text
     assert "M|m-voice|u1|听一下[v0]" in rendered.text
-    assert rendered.media == [{"kind": "voice", "url": "file:///tmp/voice.wav"}]
+    assert rendered.media == [{"kind": "voice", "url": "file:///tmp/voice.ogg"}]
 
 
 def test_present_recent_window_renders_voice_row_failure_marker() -> None:

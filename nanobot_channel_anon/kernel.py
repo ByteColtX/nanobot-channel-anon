@@ -21,10 +21,16 @@ from nanobot_channel_anon.domain import (
     ConversationRef,
     NormalizedMessage,
 )
+from nanobot_channel_anon.inbound_forward import (
+    ForwardMessageFetcher,
+)
+from nanobot_channel_anon.inbound_forward import (
+    InboundForwardEnricher as DefaultInboundForwardEnricher,
+)
 from nanobot_channel_anon.onebot import OneBotMessageSegment, OneBotRawEvent
 from nanobot_channel_anon.policy import PolicyContext, PolicyEngine
 from nanobot_channel_anon.presenter import ContextPresenter
-from nanobot_channel_anon.utils import normalize_onebot_id
+from nanobot_channel_anon.utils import normalize_onebot_id, parse_cq_params
 
 _CQ_MEDIA_PATTERN = re.compile(r"\[CQ:([^,\]]+)(?:,([^\]]+))?\]")
 _SUPPORTED_INLINE_MEDIA_TYPES = {"image", "record", "video", "file"}
@@ -84,15 +90,6 @@ class GroupMemberInfoFetcher(Protocol):
 
 
 @runtime_checkable
-class ForwardMessageFetcher(Protocol):
-    """支持按 forward_id 查询合并转发内容的传输层扩展."""
-
-    async def get_forward_message(self, forward_id: str) -> Any | None:
-        """按 forward_id 拉取合并转发原始载荷."""
-        ...
-
-
-@runtime_checkable
 class InboundForwardEnricher(Protocol):
     """支持入站 forward 展开的运行时扩展."""
 
@@ -146,9 +143,7 @@ class Kernel:
             inbound_forward_enricher is None
             and isinstance(transport, ForwardMessageFetcher)
         ):
-            from nanobot_channel_anon.inbound_forward import InboundForwardEnricher
-
-            inbound_forward_enricher = InboundForwardEnricher(fetcher=transport)
+            inbound_forward_enricher = DefaultInboundForwardEnricher(fetcher=transport)
         self.inbound_forward_enricher = inbound_forward_enricher
         self.inbound_media_enricher = inbound_media_enricher
         self._running = False
@@ -531,7 +526,7 @@ class Kernel:
         params_raw = match.group(2) or ""
         if cq_type not in _SUPPORTED_INLINE_MEDIA_TYPES:
             return match.group(0)
-        params = self._parse_inline_cq_params(params_raw)
+        params = parse_cq_params(params_raw)
         if not params:
             return match.group(0)
         media_ref = params.get("file", "").strip()
@@ -555,22 +550,6 @@ class Kernel:
             return match.group(0)
         rebuilt_params = ",".join(rebuilt_parts)
         return f"[CQ:{match.group(1)},{rebuilt_params}]"
-
-    @staticmethod
-    def _parse_inline_cq_params(params_raw: str) -> dict[str, str]:
-        """解析内联 CQ 参数为键值对."""
-        params: dict[str, str] = {}
-        if not params_raw:
-            return params
-        for part in params_raw.split(","):
-            key, separator, value = part.partition("=")
-            if not separator:
-                return {}
-            normalized_key = key.strip()
-            if not normalized_key:
-                return {}
-            params[normalized_key] = value
-        return params
 
     def _remember_outbound_messages(
         self,

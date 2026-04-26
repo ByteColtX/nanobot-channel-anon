@@ -14,7 +14,10 @@ from nanobot_channel_anon.domain import (
     NormalizedMessage,
     PresentedConversation,
 )
-from nanobot_channel_anon.utils import parse_forward_expanded_slots
+from nanobot_channel_anon.utils import (
+    attachment_placeholder,
+    parse_forward_expanded_slots,
+)
 
 _CTX_TRUNCATION_MARKER = "[...TRUNCATED...]"
 
@@ -603,7 +606,7 @@ class _CTXBuilder:
         media: list[dict[str, str]],
     ) -> tuple[str, list[str]]:
         """把消息体中的 forward 占位替换为容器引用, 并生成 F/N 行."""
-        slots = self._forward_expanded_slots_from_metadata(message.metadata)
+        slots = parse_forward_expanded_slots(message.metadata)
         if not slots or "[forward]" not in body:
             return body, []
 
@@ -626,12 +629,6 @@ class _CTXBuilder:
                 rows.extend(self._render_forward_container_rows(fid, expanded, media))
             rebuilt.append(tail)
         return "".join(rebuilt), rows
-
-    @staticmethod
-    def _forward_expanded_slots_from_metadata(
-        metadata: dict[str, object],
-    ) -> list[ForwardExpanded | None]:
-        return parse_forward_expanded_slots(metadata)
 
     def _render_forward_container_rows(
         self,
@@ -691,13 +688,7 @@ class _CTXBuilder:
     @staticmethod
     def _replace_first_placeholder(body: str, token: str, kind: str) -> str:
         """按旧占位符约定替换首个媒体标记."""
-        placeholder_map = {
-            "image": "[image]",
-            "voice": "[voice]",
-            "video": "[video]",
-            "file": "[file]",
-        }
-        placeholder = placeholder_map.get(kind)
+        placeholder = attachment_placeholder(kind)
         if placeholder and placeholder in body:
             return body.replace(placeholder, token, 1)
         return f"{body}{token}" if body else token

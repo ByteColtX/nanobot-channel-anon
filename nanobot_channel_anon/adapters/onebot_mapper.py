@@ -19,23 +19,16 @@ from nanobot_channel_anon.onebot import (
     OneBotMessageSegment,
     OneBotRawEvent,
 )
-from nanobot_channel_anon.utils import normalize_onebot_id
-
-
-def _string_value(value: Any) -> str | None:
-    """把协议层标量值规范化为非空字符串."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        normalized = value.strip()
-        return normalized or None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return str(value)
-    return None
-
+from nanobot_channel_anon.utils import (
+    attachment_placeholder,
+    normalize_onebot_id,
+    normalize_scalar_string,
+    parse_cq_params,
+)
 
 _INLINE_CQ_PATTERN = re.compile(r"\[CQ:([^,\]]+)(?:,([^\]]+))?\]")
 _VALID_NUMERIC_ID_PATTERN = re.compile(r"^\d+$")
+_FORWARD_CONTENT_MEDIA_ADAPTER = OneBotMediaAdapter()
 
 
 
@@ -66,23 +59,6 @@ def _parse_chat_id(chat_id: str) -> tuple[str, int]:
 
 
 
-def _parse_cq_params(params_raw: str) -> dict[str, str]:
-    """解析内联 CQ 参数为键值对."""
-    params: dict[str, str] = {}
-    if not params_raw:
-        return params
-    for part in params_raw.split(","):
-        key, separator, value = part.partition("=")
-        if not separator:
-            return {}
-        normalized_key = key.strip()
-        if not normalized_key:
-            return {}
-        params[normalized_key] = value
-    return params
-
-
-
 def _build_inline_cq_segment(
     cq_type: str,
     params_raw: str,
@@ -90,7 +66,7 @@ def _build_inline_cq_segment(
 ) -> OneBotMessageSegment | None:
     """把受支持的内联 CQ 构造成 OneBot 段."""
     normalized_type = cq_type.strip().lower()
-    params = _parse_cq_params(params_raw)
+    params = parse_cq_params(params_raw)
     if normalized_type == "at":
         qq = params.get("qq", "").strip()
         if qq == "all" or _VALID_NUMERIC_ID_PATTERN.fullmatch(qq):
@@ -191,7 +167,9 @@ class OneBotMapper:
             request.content,
             self.media,
         )
-        reply_to_message_id = _string_value(request.metadata.get("reply_to_message_id"))
+        reply_to_message_id = normalize_scalar_string(
+            request.metadata.get("reply_to_message_id")
+        )
         reply_segment = (
             OneBotMessageSegment(type="reply", data={"id": reply_to_message_id})
             if reply_to_message_id is not None
@@ -382,13 +360,13 @@ class OneBotMapper:
                 text = (
                     raw_text
                     if isinstance(raw_text, str)
-                    else _string_value(raw_text) or ""
+                    else normalize_scalar_string(raw_text) or ""
                 )
                 content_parts.append(text)
                 render_segments.append({"type": "text", "text": text})
                 continue
             if segment.type == "at":
-                target_id = _string_value(
+                target_id = normalize_scalar_string(
                     segment.data.get("qq") or segment.data.get("user_id")
                 )
                 if self_id is not None and target_id == self_id:
@@ -412,7 +390,7 @@ class OneBotMapper:
             attachment = self.media.extract_inbound_attachment(segment)
             if attachment is not None:
                 attachments.append(attachment)
-                placeholder = self._placeholder_for_attachment(attachment.kind)
+                placeholder = attachment_placeholder(attachment.kind)
                 content_parts.append(placeholder)
                 render_segments.append({"type": attachment.kind})
 
@@ -430,7 +408,9 @@ class OneBotMapper:
     def _mention_render_segment(
         segment: OneBotMessageSegment,
     ) -> dict[str, str] | None:
-        target_id = _string_value(segment.data.get("qq") or segment.data.get("user_id"))
+        target_id = normalize_scalar_string(
+            segment.data.get("qq") or segment.data.get("user_id")
+        )
         if target_id is None:
             return None
         if target_id == "all":
@@ -438,7 +418,7 @@ class OneBotMapper:
         return {
             "type": "mention",
             "user_id": target_id,
-            "name": _string_value(segment.data.get("name")) or "",
+            "name": normalize_scalar_string(segment.data.get("name")) or "",
         }
 
     @staticmethod
@@ -452,10 +432,10 @@ class OneBotMapper:
                     continue
                 nodes.append(OneBotMapper.build_forward_node(raw_node))
         return ForwardRef(
-            forward_id=_string_value(
+            forward_id=normalize_scalar_string(
                 forward_data.get("id") or forward_data.get("forward_id")
             ),
-            summary=_string_value(forward_data.get("summary")) or "",
+            summary=normalize_scalar_string(forward_data.get("summary")) or "",
             nodes=nodes,
         ).model_dump(exclude_none=True)
 
@@ -486,16 +466,16 @@ class OneBotMapper:
             or raw_node.get("sender_id")
         )
         sender_name = (
-            _string_value(outer_sender.get("card"))
-            or _string_value(outer_sender.get("nickname"))
-            or _string_value(node.get("nickname"))
-            or _string_value(node.get("name"))
-            or _string_value(node.get("sender_name"))
-            or _string_value(inner_sender.get("card"))
-            or _string_value(inner_sender.get("nickname"))
-            or _string_value(raw_node.get("nickname"))
-            or _string_value(raw_node.get("name"))
-            or _string_value(raw_node.get("sender_name"))
+            normalize_scalar_string(outer_sender.get("card"))
+            or normalize_scalar_string(outer_sender.get("nickname"))
+            or normalize_scalar_string(node.get("nickname"))
+            or normalize_scalar_string(node.get("name"))
+            or normalize_scalar_string(node.get("sender_name"))
+            or normalize_scalar_string(inner_sender.get("card"))
+            or normalize_scalar_string(inner_sender.get("nickname"))
+            or normalize_scalar_string(raw_node.get("nickname"))
+            or normalize_scalar_string(raw_node.get("name"))
+            or normalize_scalar_string(raw_node.get("sender_name"))
             or sender_id
             or ""
         )
@@ -552,11 +532,10 @@ class OneBotMapper:
         if isinstance(content, str):
             return content.strip(), []
         if not isinstance(content, list):
-            return _string_value(content) or "", []
+            return normalize_scalar_string(content) or "", []
 
         parts: list[str] = []
         attachments: list[Attachment] = []
-        media_adapter = OneBotMediaAdapter()
         for item in content:
             if isinstance(item, OneBotMessageSegment):
                 segment = item
@@ -565,7 +544,7 @@ class OneBotMapper:
             else:
                 continue
             if segment.type == "text":
-                text = _string_value(segment.data.get("text")) or ""
+                text = normalize_scalar_string(segment.data.get("text")) or ""
                 parts.append(text)
                 continue
             if segment.type == "reply":
@@ -573,17 +552,14 @@ class OneBotMapper:
             if segment.type == "forward":
                 parts.append("[forward]")
                 continue
-            attachment = media_adapter.extract_inbound_attachment(segment)
+            attachment = _FORWARD_CONTENT_MEDIA_ADAPTER.extract_inbound_attachment(
+                segment
+            )
             if attachment is None:
                 continue
             attachments.append(attachment)
-            parts.append(OneBotMapper._placeholder_for_attachment(attachment.kind))
+            parts.append(attachment_placeholder(attachment.kind))
         return "".join(parts).strip(), attachments
-
-    @staticmethod
-    def _stringify_forward_content(content: Any) -> str:
-        text, _ = OneBotMapper._parse_forward_content(content)
-        return text
 
     @staticmethod
     def _segments_from_message(
@@ -599,16 +575,6 @@ class OneBotMapper:
             else OneBotMessageSegment.model_validate(item)
             for item in message
         ]
-
-    @staticmethod
-    def _placeholder_for_attachment(kind: str) -> str:
-        if kind == "image":
-            return "[image]"
-        if kind == "voice":
-            return "[voice]"
-        if kind == "video":
-            return "[video]"
-        return "[file]"
 
     @staticmethod
     def _build_outbound_action(
@@ -639,7 +605,7 @@ class OneBotMapper:
 
     @staticmethod
     def _display_name(value: Any) -> str:
-        return _string_value(value) or ""
+        return normalize_scalar_string(value) or ""
 
     def _sender_id(self, raw: OneBotRawEvent) -> str | None:
         if raw.sender is not None:
@@ -669,7 +635,7 @@ class OneBotMapper:
         message_id = normalize_onebot_id(raw.message_id)
         if message_id is not None:
             return message_id
-        event_time = _string_value(raw.time) or "0"
+        event_time = normalize_scalar_string(raw.time) or "0"
         chat_scope = group_id or "private"
         target_part = target_id or "unknown"
         return ":".join(
