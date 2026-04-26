@@ -10,11 +10,15 @@ from aiohttp import web
 
 from nanobot_channel_anon.mcp.models import (
     DeleteMsgRequest,
+    GetFriendListRequest,
     GetGroupMemberListRequest,
     SendLikeRequest,
     SendPokeRequest,
     SetFriendAddRequestRequest,
     SetGroupAddRequestRequest,
+    SetGroupBanRequest,
+    SetGroupCardRequest,
+    SetGroupKickRequest,
 )
 from nanobot_channel_anon.mcp.napcat_client import NapCatAPIError, NapCatClient
 
@@ -496,6 +500,246 @@ def test_get_group_member_list_raises_for_failure_payload() -> None:
             with pytest.raises(NapCatAPIError, match="get_group_member_list"):
                 await client.get_group_member_list(
                     GetGroupMemberListRequest(group_id="123456", no_cache=True)
+                )
+        finally:
+            await server.close()
+
+    asyncio.run(case())
+
+
+def test_set_group_ban_request_includes_group_id_user_id_and_duration() -> None:
+    """Group ban should post group_id user_id and duration."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={"status": "ok", "retcode": 0, "data": {}}
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            response = await client.set_group_ban(
+                SetGroupBanRequest(group_id="123456", user_id="654321", duration=60)
+            )
+        finally:
+            await server.close()
+
+        assert response.status.value == "ok"
+        assert server.requests == [
+            {
+                "action": "set_group_ban",
+                "body": {"group_id": 123456, "user_id": 654321, "duration": 60},
+            }
+        ]
+
+    asyncio.run(case())
+
+
+def test_set_group_ban_raises_for_failure_payload() -> None:
+    """Group ban failures should surface the NapCat action name."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={
+                "status": "failed",
+                "retcode": 1401,
+                "data": None,
+                "message": "权限不足",
+                "wording": "权限不足",
+            }
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            with pytest.raises(NapCatAPIError, match="set_group_ban"):
+                await client.set_group_ban(
+                    SetGroupBanRequest(group_id="123456", user_id="654321", duration=60)
+                )
+        finally:
+            await server.close()
+
+    asyncio.run(case())
+
+
+def test_set_group_kick_request_includes_group_id_user_id_and_reject_flag() -> None:
+    """Group kick should post group_id user_id and reject_add_request."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={"status": "ok", "retcode": 0, "data": {}}
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            response = await client.set_group_kick(
+                SetGroupKickRequest(
+                    group_id="123456",
+                    user_id="654321",
+                    reject_add_request=True,
+                )
+            )
+        finally:
+            await server.close()
+
+        assert response.status.value == "ok"
+        assert server.requests == [
+            {
+                "action": "set_group_kick",
+                "body": {
+                    "group_id": 123456,
+                    "user_id": 654321,
+                    "reject_add_request": True,
+                },
+            }
+        ]
+
+    asyncio.run(case())
+
+
+def test_set_group_kick_raises_for_failure_payload() -> None:
+    """Group kick failures should surface the NapCat action name."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={
+                "status": "failed",
+                "retcode": 1404,
+                "data": None,
+                "message": "群成员不存在",
+                "wording": "群成员不存在",
+            }
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            with pytest.raises(NapCatAPIError, match="set_group_kick"):
+                await client.set_group_kick(
+                    SetGroupKickRequest(
+                        group_id="123456",
+                        user_id="654321",
+                        reject_add_request=False,
+                    )
+                )
+        finally:
+            await server.close()
+
+    asyncio.run(case())
+
+
+def test_get_friend_list_request_includes_no_cache() -> None:
+    """Friend list should post no_cache."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={
+                "status": "ok",
+                "retcode": 0,
+                "data": [
+                    {"user_id": 123456789, "nickname": "昵称", "remark": "备注"}
+                ],
+                "message": "",
+                "wording": "",
+                "stream": "normal-action",
+            }
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            response = await client.get_friend_list(
+                GetFriendListRequest(no_cache=True)
+            )
+        finally:
+            await server.close()
+
+        assert response.status.value == "ok"
+        assert server.requests == [
+            {"action": "get_friend_list", "body": {"no_cache": True}}
+        ]
+
+    asyncio.run(case())
+
+
+def test_get_friend_list_raises_for_failure_payload() -> None:
+    """Friend list failures should surface the NapCat action name."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={
+                "status": "failed",
+                "retcode": 1400,
+                "data": None,
+                "message": "获取失败",
+                "wording": "获取失败",
+            }
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            with pytest.raises(NapCatAPIError, match="get_friend_list"):
+                await client.get_friend_list(GetFriendListRequest(no_cache=False))
+        finally:
+            await server.close()
+
+    asyncio.run(case())
+
+
+def test_set_group_card_request_includes_group_id_user_id_and_card() -> None:
+    """Group card should post group_id user_id and card."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={"status": "ok", "retcode": 0, "data": {}}
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            response = await client.set_group_card(
+                SetGroupCardRequest(
+                    group_id="123456",
+                    user_id="654321",
+                    card="测试名片",
+                )
+            )
+        finally:
+            await server.close()
+
+        assert response.status.value == "ok"
+        assert server.requests == [
+            {
+                "action": "set_group_card",
+                "body": {
+                    "group_id": 123456,
+                    "user_id": 654321,
+                    "card": "测试名片",
+                },
+            }
+        ]
+
+    asyncio.run(case())
+
+
+def test_set_group_card_raises_for_failure_payload() -> None:
+    """Group card failures should surface the NapCat action name."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={
+                "status": "failed",
+                "retcode": 1401,
+                "data": None,
+                "message": "权限不足",
+                "wording": "权限不足",
+            }
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            with pytest.raises(NapCatAPIError, match="set_group_card"):
+                await client.set_group_card(
+                    SetGroupCardRequest(
+                        group_id="123456",
+                        user_id="654321",
+                        card="测试名片",
+                    )
                 )
         finally:
             await server.close()

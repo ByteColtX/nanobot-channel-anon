@@ -16,6 +16,10 @@
 - `set_group_add_request`：处理加群请求或群邀请
 - `set_friend_add_request`：处理好友请求
 - `get_group_member_list`：获取群成员列表
+- `get_friend_list`：获取好友列表
+- `set_group_ban`：设置群禁言
+- `set_group_kick`：踢出群成员
+- `set_group_card`：设置群名片
 
 大致结构：
 

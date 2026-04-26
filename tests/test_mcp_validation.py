@@ -6,11 +6,15 @@ import pytest
 
 from nanobot_channel_anon.mcp.models import (
     DeleteMsgRequest,
+    GetFriendListRequest,
     GetGroupMemberListRequest,
     SendLikeRequest,
     SendPokeRequest,
     SetFriendAddRequestRequest,
     SetGroupAddRequestRequest,
+    SetGroupBanRequest,
+    SetGroupCardRequest,
+    SetGroupKickRequest,
     ToolInputError,
 )
 
@@ -229,4 +233,168 @@ def test_set_friend_add_request_rejects_non_boolean_approve(value: object) -> No
     with pytest.raises(ToolInputError):
         SetFriendAddRequestRequest.from_tool_input(
             {"flag": "flag_123", "approve": value, "remark": "ok"}
+        )
+
+
+@pytest.mark.parametrize(
+    ("group_id", "user_id", "duration", "expected_duration"),
+    [
+        (123456, 654321, 0, 0),
+        ("123456", "654321", " 60 ", 60),
+    ],
+)
+def test_set_group_ban_request_accepts_valid_fields(
+    group_id: object,
+    user_id: object,
+    duration: object,
+    expected_duration: int,
+) -> None:
+    """Group ban inputs should normalize ids and duration."""
+    request = SetGroupBanRequest.from_tool_input(
+        {"group_id": group_id, "user_id": user_id, "duration": duration}
+    )
+    assert request.group_id == "123456"
+    assert request.user_id == "654321"
+    assert request.duration == expected_duration
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_set_group_ban_request_rejects_invalid_group_id(value: object) -> None:
+    """Group ban group_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        SetGroupBanRequest.from_tool_input(
+            {"group_id": value, "user_id": "654321", "duration": 60}
+        )
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_set_group_ban_request_rejects_invalid_user_id(value: object) -> None:
+    """Group ban user_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        SetGroupBanRequest.from_tool_input(
+            {"group_id": "123456", "user_id": value, "duration": 60}
+        )
+
+
+@pytest.mark.parametrize("value", [-1, "-1", "", "abc", True, None])
+def test_set_group_ban_request_rejects_invalid_duration(value: object) -> None:
+    """Group ban duration must be a non-negative integer."""
+    with pytest.raises(ToolInputError):
+        SetGroupBanRequest.from_tool_input(
+            {"group_id": "123456", "user_id": "654321", "duration": value}
+        )
+
+
+@pytest.mark.parametrize(
+    ("group_id", "user_id", "reject_add_request"),
+    [(123456, 654321, False), ("123456", "654321", True)],
+)
+def test_set_group_kick_request_accepts_valid_fields(
+    group_id: object,
+    user_id: object,
+    reject_add_request: bool,
+) -> None:
+    """Group kick inputs should normalize ids and preserve the flag."""
+    request = SetGroupKickRequest.from_tool_input(
+        {
+            "group_id": group_id,
+            "user_id": user_id,
+            "reject_add_request": reject_add_request,
+        }
+    )
+    assert request.group_id == "123456"
+    assert request.user_id == "654321"
+    assert request.reject_add_request is reject_add_request
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_set_group_kick_request_rejects_invalid_group_id(value: object) -> None:
+    """Group kick group_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        SetGroupKickRequest.from_tool_input(
+            {"group_id": value, "user_id": "654321", "reject_add_request": False}
+        )
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_set_group_kick_request_rejects_invalid_user_id(value: object) -> None:
+    """Group kick user_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        SetGroupKickRequest.from_tool_input(
+            {"group_id": "123456", "user_id": value, "reject_add_request": False}
+        )
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_set_group_kick_request_rejects_non_boolean_reject_add_request(
+    value: object,
+) -> None:
+    """Group kick reject_add_request must be boolean."""
+    with pytest.raises(ToolInputError):
+        SetGroupKickRequest.from_tool_input(
+            {"group_id": "123456", "user_id": "654321", "reject_add_request": value}
+        )
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_get_friend_list_request_accepts_boolean_no_cache(value: bool) -> None:
+    """Friend list no_cache should require and preserve boolean values."""
+    request = GetFriendListRequest.from_tool_input({"no_cache": value})
+    assert request.no_cache is value
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_get_friend_list_request_rejects_non_boolean_no_cache(value: object) -> None:
+    """Friend list no_cache must be boolean."""
+    with pytest.raises(ToolInputError):
+        GetFriendListRequest.from_tool_input({"no_cache": value})
+
+
+@pytest.mark.parametrize(
+    ("group_id", "user_id", "card", "expected_card"),
+    [
+        (123456, 654321, "测试名片", "测试名片"),
+        ("123456", "654321", "  ", ""),
+        ("123456", "654321", 123, "123"),
+    ],
+)
+def test_set_group_card_request_accepts_valid_fields(
+    group_id: object,
+    user_id: object,
+    card: object,
+    expected_card: str,
+) -> None:
+    """Group card inputs should normalize ids and card values."""
+    request = SetGroupCardRequest.from_tool_input(
+        {"group_id": group_id, "user_id": user_id, "card": card}
+    )
+    assert request.group_id == "123456"
+    assert request.user_id == "654321"
+    assert request.card == expected_card
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_set_group_card_request_rejects_invalid_group_id(value: object) -> None:
+    """Group card group_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        SetGroupCardRequest.from_tool_input(
+            {"group_id": value, "user_id": "654321", "card": "ok"}
+        )
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_set_group_card_request_rejects_invalid_user_id(value: object) -> None:
+    """Group card user_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        SetGroupCardRequest.from_tool_input(
+            {"group_id": "123456", "user_id": value, "card": "ok"}
+        )
+
+
+@pytest.mark.parametrize("value", [True, None])
+def test_set_group_card_request_rejects_invalid_card(value: object) -> None:
+    """Group card must be a string-like value."""
+    with pytest.raises(ToolInputError):
+        SetGroupCardRequest.from_tool_input(
+            {"group_id": "123456", "user_id": "654321", "card": value}
         )

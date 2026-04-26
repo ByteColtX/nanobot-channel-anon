@@ -230,6 +230,120 @@ class SetFriendAddRequestRequest(ToolRequestModel):
         return _normalize_nonempty_string(value, field_name="remark")
 
 
+class SetGroupBanRequest(ToolRequestModel):
+    """Request payload for NapCat /set_group_ban."""
+
+    group_id: str
+    user_id: str
+    duration: int
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def validate_user_id(cls, value: Any) -> str:
+        """Normalize a target QQ user ID."""
+        return _normalize_scalar_id(value, field_name="user_id")
+
+    @field_validator("duration", mode="before")
+    @classmethod
+    def validate_duration(cls, value: Any) -> int:
+        """Normalize a non-negative ban duration."""
+        if isinstance(value, bool):
+            raise ToolInputError("duration must be a non-negative integer")
+        if isinstance(value, int):
+            normalized = value
+        elif isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or not stripped.isdigit():
+                raise ToolInputError("duration must be a non-negative integer")
+            normalized = int(stripped)
+        else:
+            raise ToolInputError("duration must be a non-negative integer")
+
+        if normalized < 0:
+            raise ToolInputError("duration must be a non-negative integer")
+        return normalized
+
+
+class SetGroupKickRequest(ToolRequestModel):
+    """Request payload for NapCat /set_group_kick."""
+
+    group_id: str
+    user_id: str
+    reject_add_request: bool = False
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def validate_user_id(cls, value: Any) -> str:
+        """Normalize a target QQ user ID."""
+        return _normalize_scalar_id(value, field_name="user_id")
+
+    @field_validator("reject_add_request", mode="before")
+    @classmethod
+    def validate_reject_add_request(cls, value: Any) -> bool:
+        """Require a real boolean reject_add_request flag."""
+        if not isinstance(value, bool):
+            raise ToolInputError("reject_add_request must be a boolean")
+        return value
+
+
+class GetFriendListRequest(ToolRequestModel):
+    """Request payload for NapCat /get_friend_list."""
+
+    no_cache: bool = False
+
+    @field_validator("no_cache", mode="before")
+    @classmethod
+    def validate_no_cache(cls, value: Any) -> bool:
+        """Require a real boolean no_cache flag."""
+        if not isinstance(value, bool):
+            raise ToolInputError("no_cache must be a boolean")
+        return value
+
+
+class SetGroupCardRequest(ToolRequestModel):
+    """Request payload for NapCat /set_group_card."""
+
+    group_id: str
+    user_id: str
+    card: str
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def validate_user_id(cls, value: Any) -> str:
+        """Normalize a target QQ user ID."""
+        return _normalize_scalar_id(value, field_name="user_id")
+
+    @field_validator("card", mode="before")
+    @classmethod
+    def validate_card(cls, value: Any) -> str:
+        """Normalize a group card string, allowing empty values."""
+        if isinstance(value, bool) or value is None:
+            raise ToolInputError("card must be a string")
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, str):
+            return value.strip()
+        raise ToolInputError("card must be a string")
+
+
 def _normalize_scalar_id(value: Any, *, field_name: str) -> str:
     normalized = normalize_onebot_id(value)
     if normalized is None or not normalized.isdigit():

@@ -10,6 +10,7 @@ import aiohttp
 
 from nanobot_channel_anon.mcp.models import (
     DeleteMsgRequest,
+    GetFriendListRequest,
     GetGroupMemberListRequest,
     NapCatActionResult,
     NapCatActionStatus,
@@ -17,6 +18,9 @@ from nanobot_channel_anon.mcp.models import (
     SendPokeRequest,
     SetFriendAddRequestRequest,
     SetGroupAddRequestRequest,
+    SetGroupBanRequest,
+    SetGroupCardRequest,
+    SetGroupKickRequest,
 )
 
 
@@ -142,4 +146,56 @@ class NapCatClient:
         return await self.call(
             "get_group_member_list",
             {"group_id": int(request.group_id), "no_cache": request.no_cache},
+        )
+
+    async def set_group_ban(
+        self,
+        request: SetGroupBanRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat set_group_ban with a validated request model."""
+        return await self.call(
+            "set_group_ban",
+            {
+                "group_id": int(request.group_id),
+                "user_id": int(request.user_id),
+                "duration": request.duration,
+            },
+        )
+
+    async def set_group_kick(
+        self,
+        request: SetGroupKickRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat set_group_kick with a validated request model."""
+        return await self.call(
+            "set_group_kick",
+            {
+                "group_id": int(request.group_id),
+                "user_id": int(request.user_id),
+                "reject_add_request": request.reject_add_request,
+            },
+        )
+
+    async def get_friend_list(
+        self,
+        request: GetFriendListRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_friend_list with a validated request model."""
+        return await self.call(
+            "get_friend_list",
+            {"no_cache": request.no_cache},
+        )
+
+    async def set_group_card(
+        self,
+        request: SetGroupCardRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat set_group_card with a validated request model."""
+        return await self.call(
+            "set_group_card",
+            {
+                "group_id": int(request.group_id),
+                "user_id": int(request.user_id),
+                "card": request.card,
+            },
         )
