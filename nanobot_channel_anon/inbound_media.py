@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urlparse
@@ -245,7 +244,7 @@ class InboundMediaEnricher:
         if not self._is_within_size_limit(file_size):
             return None, self._with_download_status(metadata, "skipped_size")
 
-        target_path = self._cache_path(attachment, source_url)
+        target_path = self._cache_path(attachment)
         if target_path.exists():
             return target_path, metadata
 
@@ -389,22 +388,23 @@ class InboundMediaEnricher:
         except ValueError:
             return None
 
-    def _cache_path(self, attachment: Attachment, source_url: str) -> Path:
+    def _cache_path(self, attachment: Attachment) -> Path:
         """为远端附件生成稳定缓存路径."""
-        base_name = self._attachment_name(attachment, source_url)
-        stem = Path(base_name).stem or attachment.kind
-        suffix = Path(base_name).suffix
-        digest = hashlib.sha256(source_url.encode("utf-8")).hexdigest()[:8]
-        return get_media_dir("anon") / f"{stem}-{digest}{suffix}"
+        return get_media_dir("anon") / self._attachment_name(attachment)
 
     @staticmethod
-    def _attachment_name(attachment: Attachment, source_ref: str) -> str:
+    def _attachment_name(attachment: Attachment) -> str:
         """返回附件的稳定文件名."""
         name = Path(attachment.name).name.strip()
         if name:
             return name
-        parsed = urlparse(source_ref)
-        candidate = Path(parsed.path or source_ref).name.strip()
+        original_file = attachment.metadata.get("original_file")
+        if isinstance(original_file, str):
+            candidate = Path(original_file).name.strip()
+            if candidate:
+                return candidate
+        parsed = urlparse(attachment.url)
+        candidate = Path(parsed.path or attachment.url).name.strip()
         return candidate or attachment.kind
 
     @staticmethod

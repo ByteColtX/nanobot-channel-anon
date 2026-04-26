@@ -140,6 +140,27 @@ def test_extract_inbound_attachment_keeps_file_size_metadata() -> None:
     )
 
 
+def test_extract_inbound_attachment_uses_message_file_as_filename() -> None:
+    """入站附件落盘名应直接继承 message.data.file."""
+    adapter = OneBotMediaAdapter()
+    segment = OneBotMessageSegment(
+        type="image",
+        data={
+            "file": "A9381FD36555D392AA81D0F1B5B38AAF.jpg",
+            "url": "https://example.com/download?x=1",
+        },
+    )
+
+    attachment = adapter.extract_inbound_attachment(segment)
+
+    assert attachment is not None
+    assert attachment.name == "A9381FD36555D392AA81D0F1B5B38AAF.jpg"
+    assert (
+        attachment.metadata["original_file"]
+        == "A9381FD36555D392AA81D0F1B5B38AAF.jpg"
+    )
+
+
 def test_extract_inbound_attachment_keeps_original_path_metadata() -> None:
     """入站附件应保留 path 以供后续增强逻辑复用."""
     adapter = OneBotMediaAdapter()

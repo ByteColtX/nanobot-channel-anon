@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import aiohttp
 
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.domain import Attachment, ConversationRef, NormalizedMessage
@@ -67,6 +71,40 @@ async def _transcribe_ok(_file_path: str | Path) -> str:
 
 async def _transcribe_empty(_file_path: str | Path) -> str:
     return ""
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    async def __aenter__(self) -> _FakeResponse:
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        _ = (exc_type, exc, tb)
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def read(self) -> bytes:
+        return self._body
+
+
+class _FakeClientSession:
+    def __init__(self, body: bytes, calls: list[str]) -> None:
+        self._body = body
+        self._calls = calls
+
+    async def __aenter__(self) -> _FakeClientSession:
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        _ = (exc_type, exc, tb)
+
+    def get(self, url: str, *, timeout: aiohttp.ClientTimeout) -> _FakeResponse:
+        _ = timeout
+        self._calls.append(url)
+        return _FakeResponse(self._body)
 
 
 def test_enricher_filters_video_and_file_only_message() -> None:
@@ -199,3 +237,95 @@ def test_enricher_records_successful_voice_transcription() -> None:
     attachment = enriched.attachments[0]
     assert attachment.metadata["transcription_status"] == "success"
     assert attachment.metadata["transcription_text"] == "你好世界"
+
+
+def test_materialize_attachment_reuses_existing_cache_when_file_exists() -> None:
+    """已有同名缓存文件时应直接复用, 不再下载."""
+    enricher = InboundMediaEnricher(config=_config())
+    attachment = Attachment(
+        kind="image",
+        url="https://example.com/media/a.png",
+        name="A9381FD36555D392AA81D0F1B5B38AAF.jpg",
+        metadata={
+            "file_size": "3",
+            "original_file": "A9381FD36555D392AA81D0F1B5B38AAF.jpg",
+        },
+    )
+
+    with TemporaryDirectory() as tmpdir:
+        cached_path = Path(tmpdir) / "A9381FD36555D392AA81D0F1B5B38AAF.jpg"
+        cached_path.write_bytes(b"x")
+        calls: list[str] = []
+        original_cache_path = enricher._cache_path
+        original_client_session = aiohttp.ClientSession
+        try:
+            enricher._cache_path = lambda _attachment: cached_path  # type: ignore[method-assign]
+            aiohttp.ClientSession = lambda: _FakeClientSession(b"zzz", calls)  # type: ignore[assignment]
+            local_path, metadata = asyncio.run(
+                enricher._materialize_attachment(attachment)
+            )
+        finally:
+            enricher._cache_path = original_cache_path  # type: ignore[method-assign]
+            aiohttp.ClientSession = original_client_session  # type: ignore[assignment]
+
+    assert local_path == cached_path
+    assert metadata == {
+        "file_size": "3",
+        "original_file": "A9381FD36555D392AA81D0F1B5B38AAF.jpg",
+    }
+    assert calls == []
+
+
+def test_materialize_attachment_downloads_when_named_cache_missing() -> None:
+    """同名缓存不存在时应正常下载并写入该文件名."""
+    enricher = InboundMediaEnricher(config=_config())
+    attachment = Attachment(
+        kind="image",
+        url="https://example.com/media/a.png",
+        name="A9381FD36555D392AA81D0F1B5B38AAF.jpg",
+        metadata={
+            "file_size": "4",
+            "original_file": "A9381FD36555D392AA81D0F1B5B38AAF.jpg",
+        },
+    )
+
+    with TemporaryDirectory() as tmpdir:
+        cached_path = Path(tmpdir) / "A9381FD36555D392AA81D0F1B5B38AAF.jpg"
+        calls: list[str] = []
+        original_cache_path = enricher._cache_path
+        original_client_session = aiohttp.ClientSession
+        try:
+            enricher._cache_path = lambda _attachment: cached_path  # type: ignore[method-assign]
+            aiohttp.ClientSession = lambda: _FakeClientSession(b"abcd", calls)  # type: ignore[assignment]
+            local_path, metadata = asyncio.run(
+                enricher._materialize_attachment(attachment)
+            )
+        finally:
+            enricher._cache_path = original_cache_path  # type: ignore[method-assign]
+            aiohttp.ClientSession = original_client_session  # type: ignore[assignment]
+
+        assert cached_path.read_bytes() == b"abcd"
+
+    assert local_path == cached_path
+    assert metadata == {
+        "file_size": "4",
+        "original_file": "A9381FD36555D392AA81D0F1B5B38AAF.jpg",
+    }
+    assert calls == ["https://example.com/media/a.png"]
+
+
+def test_cache_path_uses_message_file_name_directly() -> None:
+    """缓存文件名应直接使用 message.data.file."""
+    enricher = InboundMediaEnricher(config=_config())
+    attachment = Attachment(
+        kind="image",
+        url="https://example.com/download?appid=1407&fileid=abc",
+        name="A9381FD36555D392AA81D0F1B5B38AAF.jpg",
+        metadata={"original_file": "A9381FD36555D392AA81D0F1B5B38AAF.jpg"},
+    )
+
+    first = enricher._cache_path(attachment)
+    second = enricher._cache_path(attachment)
+
+    assert first.name == "A9381FD36555D392AA81D0F1B5B38AAF.jpg"
+    assert second.name == first.name
