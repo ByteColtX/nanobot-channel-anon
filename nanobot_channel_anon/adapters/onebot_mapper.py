@@ -189,16 +189,21 @@ class OneBotMapper:
             standalone_media_segments.append(attachment)
 
         actions: list[OneBotAPIRequest] = []
-        for attachment in standalone_media_segments:
+
+        def emit(segments: list[OneBotMessageSegment]) -> None:
+            nonlocal reply_segment
             actions.append(
                 self._build_outbound_action(
                     action=action,
                     id_key=id_key,
                     target_id=target_id,
-                    segments=self._with_optional_reply([attachment], reply_segment),
+                    segments=self._with_optional_reply(segments, reply_segment),
                 )
             )
             reply_segment = None
+
+        for attachment in standalone_media_segments:
+            emit([attachment])
 
         mixed_segments = [*image_segments]
         for segment in content_segments:
@@ -210,38 +215,12 @@ class OneBotMapper:
                 mixed_segments.append(segment)
                 continue
             if mixed_segments:
-                actions.append(
-                    self._build_outbound_action(
-                        action=action,
-                        id_key=id_key,
-                        target_id=target_id,
-                        segments=self._with_optional_reply(
-                            mixed_segments,
-                            reply_segment,
-                        ),
-                    )
-                )
+                emit(mixed_segments)
                 mixed_segments = []
-                reply_segment = None
-            actions.append(
-                self._build_outbound_action(
-                    action=action,
-                    id_key=id_key,
-                    target_id=target_id,
-                    segments=self._with_optional_reply([segment], reply_segment),
-                )
-            )
-            reply_segment = None
+            emit([segment])
 
         if mixed_segments:
-            actions.append(
-                self._build_outbound_action(
-                    action=action,
-                    id_key=id_key,
-                    target_id=target_id,
-                    segments=self._with_optional_reply(mixed_segments, reply_segment),
-                )
-            )
+            emit(mixed_segments)
 
         return actions
 

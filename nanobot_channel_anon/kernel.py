@@ -187,19 +187,47 @@ class Kernel:
         if not self.policy.is_allowed(message):
             return
 
+        message, reply_target = await self._prepare_inbound_message(message)
+        if await self._route_passthrough_slash_command(message):
+            return
+        if self._should_suppress_message(message):
+            return
+
+        await self._remember_and_publish_triggered_inbound(
+            message,
+            reply_target=reply_target,
+        )
+
+    async def _prepare_inbound_message(
+        self,
+        message: NormalizedMessage,
+    ) -> tuple[NormalizedMessage, NormalizedMessage | None]:
+        """补全入站消息的上下文相关字段并执行增强."""
         message, reply_target = await self._hydrate_message(message)
         if self.inbound_forward_enricher is not None:
             message = await self.inbound_forward_enricher.enrich(message)
         if self.inbound_media_enricher is not None:
             message = await self.inbound_media_enricher.enrich(message)
+        return message, reply_target
 
-        if self.policy.should_passthrough_slash_command(message):
-            self._update_member_profile(message)
-            await self._publish_passthrough_slash_command(message)
-            return
-        if self._should_suppress_message(message):
-            return
+    async def _route_passthrough_slash_command(
+        self,
+        message: NormalizedMessage,
+    ) -> bool:
+        """按需直通超级管理员斜杠命令."""
+        if not self.policy.should_passthrough_slash_command(message):
+            return False
+        self._update_member_profile(message)
+        await self._publish_passthrough_slash_command(message)
+        return True
 
+    async def _remember_and_publish_triggered_inbound(
+        self,
+        message: NormalizedMessage,
+        *,
+        reply_target: NormalizedMessage | None,
+    ) -> None:
+        """保留未触发消息上下文, 并在命中策略时发布."""
         await self.remember_message(message)
         decision = self.policy.decide_trigger(
             message,
@@ -207,7 +235,6 @@ class Kernel:
         )
         if not decision.triggered:
             return
-
         await self._publish_inbound(
             message,
             trigger_reason=decision.reason.value,
