@@ -256,9 +256,109 @@ def test_present_recent_window_prefers_local_image_media_ref() -> None:
         self_id="bot",
     )
 
-    assert "I|i0|a-local.png" in rendered.text
+    assert "I|i0|a.png" in rendered.text
     assert "M|m-local-image|u1|看图[i0]" in rendered.text
     assert rendered.media == [{"kind": "image", "url": "/tmp/a-local.png"}]
+
+
+
+def test_present_recent_window_frontloads_uncached_reply_target_image() -> None:
+    """缓存外纯图片 reply target 应带着图片定义行一起前置显示."""
+    store = ContextStore(max_messages_per_conversation=5)
+    store.append(
+        _message(
+            "m2",
+            sender_id="456",
+            sender_name="Bob",
+            content="你能看见我引用了什么吗",
+            reply_to_message_id="m1",
+        )
+    )
+
+    rendered = ContextPresenter().present_recent_window(
+        store,
+        _conversation(),
+        self_id="bot",
+        extra_messages=[
+            _message(
+                "m1",
+                sender_id="123",
+                sender_name="Alice",
+                content="[image]",
+                attachments=[
+                    Attachment(
+                        kind="image",
+                        url="https://example.com/download",
+                        name="quoted-image.png",
+                        metadata={"file_size": "123", "original_file": "download"},
+                    )
+                ],
+            )
+        ],
+    )
+
+    message_rows = [
+        line for line in rendered.text.splitlines() if line.startswith("M|")
+    ]
+    assert "I|i0|quoted-image.png" in rendered.text
+    assert message_rows[0] == "M|m1|u1|[i0]"
+    assert message_rows[1] == "M|m2|u2|^m1 你能看见我引用了什么吗"
+
+
+
+def test_present_recent_window_keeps_mixed_reply_target_render_order_with_named_image(
+) -> None:
+    """混合文本/@/图片的 reply target 应保序并避免退化成 download."""
+    store = ContextStore(max_messages_per_conversation=5)
+    store.append(
+        _message(
+            "m2",
+            sender_id="456",
+            sender_name="Bob",
+            content="引用一下",
+            reply_to_message_id="m1",
+        )
+    )
+
+    rendered = ContextPresenter().present_recent_window(
+        store,
+        _conversation(),
+        self_id="bot",
+        extra_messages=[
+            _message(
+                "m1",
+                sender_id="123",
+                sender_name="Alice",
+                content="fallback ignored",
+                attachments=[
+                    Attachment(
+                        kind="image",
+                        url="https://example.com/download",
+                        name="",
+                        metadata={
+                            "file_size": "123",
+                            "cache_name": "quoted-cache.png",
+                            "original_file": "download",
+                        },
+                    )
+                ],
+                metadata={
+                    "render_segments": [
+                        {"type": "text", "text": "先看 "},
+                        {"type": "mention", "user_id": "1001", "name": "原"},
+                        {"type": "text", "text": " 发的 "},
+                        {"type": "image"},
+                        {"type": "text", "text": " 再说"},
+                    ]
+                },
+            )
+        ],
+    )
+
+    assert "U|u2|1001|原" in rendered.text
+    assert "I|i0|quoted-cache.png" in rendered.text
+    assert "I|i0|download" not in rendered.text
+    assert "M|m1|u1|先看 @u2 发的 [i0] 再说" in rendered.text
 
 
 def test_present_recent_window_collects_allowed_image_media_once() -> None:

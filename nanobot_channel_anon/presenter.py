@@ -423,7 +423,7 @@ class _CTXBuilder:
         if attachment.kind == "image":
             image_ref = self._image_media_ref(attachment)
             if image_ref is not None and self._is_media_allowed(attachment):
-                iid = self._ensure_image(image_ref)
+                iid = self._ensure_image(image_ref, attachment)
                 if not any(item["url"] == image_ref for item in media):
                     media.append({"kind": attachment.kind, "url": image_ref})
                 return f"[{iid}]"
@@ -455,14 +455,16 @@ class _CTXBuilder:
             return True
         return file_size <= self.media_max_size_bytes
 
-    def _ensure_image(self, media_ref: str) -> str:
+    def _ensure_image(self, media_ref: str, attachment: Attachment) -> str:
         """分配图片别名."""
         existing_iid = self._image_ids.get(media_ref)
         if existing_iid is not None:
             return existing_iid
         iid = f"i{len(self._images)}"
         self._image_ids[media_ref] = iid
-        self._images.append(_ImageRow(iid=iid, filename=self._basename(media_ref)))
+        self._images.append(
+            _ImageRow(iid=iid, filename=self._image_filename(attachment, media_ref))
+        )
         return iid
 
     def _ensure_voice(self, attachment: Attachment) -> str:
@@ -518,13 +520,45 @@ class _CTXBuilder:
             rows.append("|".join(row))
         return rows
 
+    @classmethod
+    def _image_filename(cls, attachment: Attachment, media_ref: str) -> str:
+        """返回图片在 CTX/1 中使用的文件名."""
+        metadata = attachment.metadata
+        candidates = (
+            metadata.get("cache_name"),
+            attachment.name,
+            metadata.get("original_file"),
+            metadata.get("local_path"),
+            media_ref,
+        )
+        for candidate in candidates:
+            name = cls._basename_from_candidate(candidate)
+            if cls._is_informative_image_name(name):
+                return name
+        return "image"
+
     @staticmethod
-    def _basename(media_ref: str) -> str:
+    def _is_informative_image_name(name: str) -> bool:
+        """判断图片文件名是否足够提供语义信息."""
+        normalized = name.strip().lower()
+        if not normalized:
+            return False
+        return normalized not in {"download", "image"}
+
+    @staticmethod
+    def _basename_from_candidate(candidate: object) -> str:
+        """从任意候选值中提取文件名."""
+        if not isinstance(candidate, str):
+            return ""
+        parsed = urlparse(candidate)
+        raw_value = parsed.path or candidate
+        name = PurePosixPath(raw_value).name.strip()
+        return name or candidate.strip()
+
+    @classmethod
+    def _basename(cls, media_ref: str) -> str:
         """提取媒体引用的文件名."""
-        parsed = urlparse(media_ref)
-        candidate = parsed.path or media_ref
-        name = PurePosixPath(candidate).name
-        return name or media_ref
+        return cls._basename_from_candidate(media_ref)
 
     @staticmethod
     def _image_media_ref(attachment: Attachment) -> str | None:

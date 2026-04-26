@@ -988,6 +988,135 @@ def test_kernel_backfills_missing_reply_target_via_get_msg() -> None:
     asyncio.run(case())
 
 
+
+def test_kernel_backfills_image_reply_target_via_get_msg() -> None:
+    """缓存外纯图片 reply target 应经 get_msg 回补并进入 CTX."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        transport = RecordingTransport()
+        transport.fetched_messages["9001"] = OneBotRawEvent.model_validate(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "message_id": 9001,
+                "group_id": 456,
+                "user_id": 42,
+                "self_id": 42,
+                "message": [
+                    {
+                        "type": "image",
+                        "data": {
+                            "file": "quoted-image.png",
+                            "url": "https://example.com/download",
+                            "file_size": "123",
+                        },
+                    }
+                ],
+                "sender": {"user_id": 42, "nickname": "Bot"},
+                "time": 1776818315,
+            }
+        )
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=transport,
+        )
+        kernel.state.set_self_profile(user_id="42", nickname="Bot")
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="user-1",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="123",
+                sender_name="Alice",
+                content="你能看见我引用了什么吗",
+                reply_to_message_id="9001",
+            )
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert transport.get_message_calls == ["9001"]
+        assert inbound.metadata["trigger_reason"] == "reply_to_self"
+        assert "I|i0|quoted-image.png" in inbound.content
+        assert "M|9001|u0|[i0]" in inbound.content
+        assert "M|user-1|u1|^9001 你能看见我引用了什么吗" in inbound.content
+
+    asyncio.run(case())
+
+
+
+def test_kernel_backfills_mixed_image_reply_target_via_get_msg() -> None:
+    """缓存外混合文本/@/图片 reply target 应保持 render_segments 顺序."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        transport = RecordingTransport()
+        transport.fetched_messages["9001"] = OneBotRawEvent.model_validate(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "message_id": 9001,
+                "group_id": 456,
+                "user_id": 42,
+                "self_id": 42,
+                "message": [
+                    {"type": "text", "data": {"text": "先看 "}},
+                    {"type": "at", "data": {"qq": "1001", "name": "原"}},
+                    {"type": "text", "data": {"text": " 发的 "}},
+                    {
+                        "type": "image",
+                        "data": {
+                            "file": "download",
+                            "url": "https://example.com/download",
+                            "file_size": "123",
+                        },
+                    },
+                    {"type": "text", "data": {"text": " 再说"}},
+                ],
+                "sender": {"user_id": 42, "nickname": "Bot"},
+                "time": 1776818315,
+            }
+        )
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=transport,
+        )
+        kernel.state.set_self_profile(user_id="42", nickname="Bot")
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="user-1",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="123",
+                sender_name="Alice",
+                content="引用一下",
+                reply_to_message_id="9001",
+            )
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert transport.get_message_calls == ["9001"]
+        assert "U|u1|1001|原" in inbound.content
+        assert "I|i0|image" in inbound.content
+        assert "I|i0|download" not in inbound.content
+        assert "M|9001|u0|先看 @u1 发的 [i0] 再说" in inbound.content
+        assert "M|user-1|u2|^9001 引用一下" in inbound.content
+
+    asyncio.run(case())
+
+
 def test_kernel_passthroughs_known_slash_command_for_super_admin_without_storing(
 ) -> None:
     """已知菜单命令遇到超级管理员时应直通总线、更新资料且不写入上下文."""
@@ -1513,7 +1642,7 @@ def test_kernel_publishes_enriched_image_and_voice_media_refs() -> None:
 
         assert enricher.calls == ["user-media"]
         assert inbound.media == ["/tmp/a-local.png", "file:///tmp/voice.wav"]
-        assert "I|i0|a-local.png" in inbound.content
+        assert "I|i0|a.png" in inbound.content
         assert "V|v0|voice.wav|=你好" in inbound.content
 
     asyncio.run(case())
