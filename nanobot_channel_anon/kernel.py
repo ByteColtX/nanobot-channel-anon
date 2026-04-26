@@ -9,7 +9,6 @@ from typing import Any, Protocol, runtime_checkable
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
-from pydantic import BaseModel
 
 from nanobot_channel_anon.adapters.onebot_mapper import OneBotMapper
 from nanobot_channel_anon.adapters.onebot_media import OneBotMediaAdapter
@@ -27,7 +26,11 @@ from nanobot_channel_anon.inbound_forward import (
 from nanobot_channel_anon.inbound_forward import (
     InboundForwardEnricher as DefaultInboundForwardEnricher,
 )
-from nanobot_channel_anon.onebot import OneBotMessageSegment, OneBotRawEvent
+from nanobot_channel_anon.onebot import (
+    OneBotAPIRequest,
+    OneBotMessageSegment,
+    OneBotRawEvent,
+)
 from nanobot_channel_anon.policy import PolicyContext, PolicyEngine
 from nanobot_channel_anon.presenter import ContextPresenter
 from nanobot_channel_anon.utils import normalize_onebot_id, parse_cq_params
@@ -42,7 +45,7 @@ class RequestBatchSender(Protocol):
 
     async def send_requests(
         self,
-        requests: Sequence[BaseModel],
+        requests: Sequence[OneBotAPIRequest],
     ) -> Sequence[OneBotRawEvent]:
         """发送一批协议层出站请求并返回响应."""
         ...
@@ -338,16 +341,17 @@ class Kernel:
     ) -> tuple[NormalizedMessage, NormalizedMessage | None]:
         """补全依赖上下文的入站字段."""
         reply_target: NormalizedMessage | None = None
-        reply_to_self = message.reply_to_self
-        if not reply_to_self and message.reply_to_message_id is not None:
-            reply_target = self.context_store.get_message(
-                message.conversation,
-                message.reply_to_message_id,
-            )
-            if reply_target is None:
-                reply_target = await self._fetch_reply_target(message)
-            reply_to_self = bool(reply_target is not None and reply_target.from_self)
-        return message.model_copy(update={"reply_to_self": reply_to_self}), reply_target
+        if message.reply_to_self or message.reply_to_message_id is None:
+            return message, reply_target
+        reply_target = self.context_store.get_message(
+            message.conversation,
+            message.reply_to_message_id,
+        )
+        if reply_target is None:
+            reply_target = await self._fetch_reply_target(message)
+        if reply_target is None or not reply_target.from_self:
+            return message, reply_target
+        return message.model_copy(update={"reply_to_self": True}), reply_target
 
     async def _fetch_reply_target(
         self,
@@ -553,7 +557,7 @@ class Kernel:
 
     def _remember_outbound_messages(
         self,
-        requests: Sequence[BaseModel],
+        requests: Sequence[OneBotAPIRequest],
         responses: Sequence[OneBotRawEvent],
     ) -> None:
         """把发送成功的机器人出站消息写回上下文."""
@@ -563,13 +567,13 @@ class Kernel:
 
         sender_name = self.state.self_nickname or self.state.self_id or self_id
         for outbound, response in zip(requests, responses, strict=False):
-            action = self._base_model_string_field(outbound, "action")
-            if action is None:
+            params = outbound.params
+            if not isinstance(params, dict):
                 continue
-            params = self._base_model_dict_field(outbound, "params")
-            if params is None:
-                continue
-            conversation = self._conversation_from_outbound_action(action, params)
+            conversation = self._conversation_from_outbound_action(
+                outbound.action,
+                params,
+            )
             if conversation is None:
                 continue
 
@@ -595,19 +599,6 @@ class Kernel:
                 card=sender_name if conversation.kind == "group" else "",
                 nickname=sender_name,
             )
-
-    @staticmethod
-    def _base_model_string_field(model: BaseModel, field_name: str) -> str | None:
-        value = getattr(model, field_name, None)
-        return value if isinstance(value, str) else None
-
-    @staticmethod
-    def _base_model_dict_field(
-        model: BaseModel,
-        field_name: str,
-    ) -> dict[str, object] | None:
-        value = getattr(model, field_name, None)
-        return value if isinstance(value, dict) else None
 
     @staticmethod
     def _conversation_from_outbound_action(

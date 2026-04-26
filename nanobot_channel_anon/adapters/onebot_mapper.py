@@ -444,8 +444,8 @@ class OneBotMapper:
         """构建一条可渲染的浅层转发节点."""
         raw_node = OneBotMapper._unwrap_forward_node(node)
         content_source = OneBotMapper._forward_content_source(node, raw_node)
-        text_content, attachments = OneBotMapper._parse_forward_content(
-            content_source
+        text_content, attachments, reply_to_message_id = (
+            OneBotMapper._parse_forward_content(content_source)
         )
         outer_sender_raw = node.get("sender")
         outer_sender: dict[str, Any] = (
@@ -488,9 +488,7 @@ class OneBotMapper:
                 or raw_node.get("message_id")
                 or raw_node.get("id")
             ),
-            reply_to_message_id=OneBotMapper._forward_reply_to_message_id(
-                content_source
-            ),
+            reply_to_message_id=reply_to_message_id,
             content=text_content,
             attachments=attachments,
         )
@@ -516,26 +514,19 @@ class OneBotMapper:
         return raw_node.get("message")
 
     @staticmethod
-    def _forward_reply_to_message_id(content: Any) -> str | None:
-        for segment in OneBotMapper._segments_from_message(content):
-            if segment.type != "reply":
-                continue
-            return normalize_onebot_id(
-                segment.data.get("id") or segment.data.get("message_id")
-            )
-        return None
-
-    @staticmethod
-    def _parse_forward_content(content: Any) -> tuple[str, list[Attachment]]:
+    def _parse_forward_content(
+        content: Any,
+    ) -> tuple[str, list[Attachment], str | None]:
         if content is None:
-            return "", []
+            return "", [], None
         if isinstance(content, str):
-            return content.strip(), []
+            return content.strip(), [], None
         if not isinstance(content, list):
-            return normalize_scalar_string(content) or "", []
+            return normalize_scalar_string(content) or "", [], None
 
         parts: list[str] = []
         attachments: list[Attachment] = []
+        reply_to_message_id: str | None = None
         for item in content:
             if isinstance(item, OneBotMessageSegment):
                 segment = item
@@ -548,6 +539,10 @@ class OneBotMapper:
                 parts.append(text)
                 continue
             if segment.type == "reply":
+                if reply_to_message_id is None:
+                    reply_to_message_id = normalize_onebot_id(
+                        segment.data.get("id") or segment.data.get("message_id")
+                    )
                 continue
             if segment.type == "forward":
                 parts.append("[forward]")
@@ -559,7 +554,7 @@ class OneBotMapper:
                 continue
             attachments.append(attachment)
             parts.append(attachment_placeholder(attachment.kind))
-        return "".join(parts).strip(), attachments
+        return "".join(parts).strip(), attachments, reply_to_message_id
 
     @staticmethod
     def _segments_from_message(

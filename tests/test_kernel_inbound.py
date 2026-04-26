@@ -889,6 +889,34 @@ def test_kernel_enforces_trigger_policy_before_publish() -> None:
     asyncio.run(case())
 
 
+def test_kernel_keeps_untriggered_message_in_context() -> None:
+    """未触发消息也应留在上下文中供后续触发使用."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                trigger_on_reply=False,
+                group_trigger_prob=0.0,
+            ),
+            bus=bus,
+            transport=RecordingTransport(),
+        )
+
+        message = _group_message(content="plain text", message_id="m-untriggered")
+        await kernel.handle_inbound(message)
+
+        assert bus.inbound_size == 0
+        assert (
+            kernel.context_store.get_message(message.conversation, message.message_id)
+            == message
+        )
+
+    asyncio.run(case())
+
+
 def test_kernel_marks_reply_to_self_from_context_after_allowlist() -> None:
     """已授权消息仍应在 allowlist 之后完成 reply_to_self 判定并触发."""
 
