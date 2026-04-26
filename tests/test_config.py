@@ -41,17 +41,27 @@ def test_disabled_config_allows_empty_ws_url() -> None:
     assert config.ws_url == ""
 
 
-def test_allow_from_and_super_admins_normalize_scalar_ids() -> None:
-    """配置层应直接负责标准化 ID 相关字段."""
+def test_allow_from_normalizes_only_canonical_conversation_keys() -> None:
+    """allow_from 只应接受显式会话键并去重标准化."""
     config = AnonConfig.model_validate(
         {
-            "allow_from": [" group:456 ", 123, "private:789", True, "123"],
+            "allow_from": [" group:456 ", "private:789", "group:456", "*"],
             "super_admins": [" 42 ", 7, True, "42"],
         }
     )
 
-    assert config.allow_from == ["group:456", "123", "private:789"]
+    assert config.allow_from == ["group:456", "private:789", "*"]
+    assert config.allowed_conversation_keys == frozenset({"group:456", "private:789"})
     assert config.super_admins == ["42", "7"]
+
+
+def test_allow_from_rejects_bare_ids() -> None:
+    """裸 ID 不再是合法 allow_from 配置."""
+    with pytest.raises(
+        ValidationError,
+        match="allow_from entries must use group:<id> or private:<id>",
+    ):
+        AnonConfig.model_validate({"allow_from": ["123"]})
 
 
 def test_context_and_media_limits_keep_legacy_defaults() -> None:

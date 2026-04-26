@@ -50,10 +50,7 @@ class PolicyEngine:
             return False
         if self.config.allow_all:
             return True
-        return (
-            message.sender_id in self.config.allowed_sender_ids
-            or message.conversation.key in self.config.allowed_conversation_keys
-        )
+        return message.conversation.key in self.config.allowed_conversation_keys
 
     def is_super_admin(self, message: NormalizedMessage) -> bool:
         """判断发送者是否为超级管理员."""

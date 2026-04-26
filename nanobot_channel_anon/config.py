@@ -17,8 +17,8 @@ class AnonConfig(Base):
     allow_from: list[str] = Field(
         default_factory=list,
         description=(
-            "允许访问的来源列表。支持发送者 ID、原始会话 ID, "
-            "以及 group:<id>/private:<id> 形式的标准会话键; [*] 表示允许全部。"
+            "允许访问的会话列表。仅支持 group:<id>/private:<id> 形式的标准会话键; "
+            "[*] 表示允许全部。"
         ),
     )
     ws_url: str = Field(default="", description="NapCat OneBot WebSocket 地址。")
@@ -72,7 +72,7 @@ class AnonConfig(Base):
         if value is None:
             return []
         if not isinstance(value, list):
-            raise ValueError("allow_from must be a list of sender or group IDs")
+            raise ValueError("allow_from must be a list of canonical conversation keys")
 
         normalized: list[str] = []
         seen: set[str] = set()
@@ -109,24 +109,13 @@ class AnonConfig(Base):
         return "*" in self.allow_from
 
     @property
-    def allowed_sender_ids(self) -> frozenset[str]:
-        """返回允许的发送者 ID 集合."""
+    def allowed_conversation_keys(self) -> frozenset[str]:
+        """返回允许的标准会话键集合."""
         return frozenset(
             entry
             for entry in self.allow_from
-            if entry != "*" and ":" not in entry
-        )
-
-    @property
-    def allowed_conversation_keys(self) -> frozenset[str]:
-        """返回允许的标准会话键集合."""
-        canonical_keys = {
-            entry
-            for entry in self.allow_from
             if entry.startswith(("group:", "private:"))
-        }
-        canonical_keys.update(f"group:{entry}" for entry in self.allowed_sender_ids)
-        return frozenset(canonical_keys)
+        )
 
     @classmethod
     def _normalize_allow_entry(cls, value: Any) -> str | None:
@@ -137,12 +126,16 @@ class AnonConfig(Base):
         if item == "*":
             return item
         prefix, separator, raw_id = item.partition(":")
-        if separator:
-            normalized_id = normalize_onebot_id(raw_id)
-            if prefix not in {"group", "private"} or normalized_id is None:
-                return item
-            return f"{prefix}:{normalized_id}"
-        return item
+        if not separator:
+            raise ValueError(
+                "allow_from entries must use group:<id> or private:<id>"
+            )
+        normalized_id = normalize_onebot_id(raw_id)
+        if prefix not in {"group", "private"} or normalized_id is None:
+            raise ValueError(
+                "allow_from entries must use group:<id> or private:<id>"
+            )
+        return f"{prefix}:{normalized_id}"
 
     @model_validator(mode="after")
     def validate_enabled_requirements(self) -> AnonConfig:

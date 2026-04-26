@@ -156,15 +156,15 @@ class Kernel:
 
     async def handle_inbound(self, message: NormalizedMessage) -> None:
         """处理适配层产出的标准化入站消息."""
-        message, reply_target = await self._hydrate_message(message)
-        if self.inbound_media_enricher is not None:
-            message = await self.inbound_media_enricher.enrich(message)
-
         if message.from_self:
             await self.remember_message(message)
             return
         if not self.policy.is_allowed(message):
             return
+
+        message, reply_target = await self._hydrate_message(message)
+        if self.inbound_media_enricher is not None:
+            message = await self.inbound_media_enricher.enrich(message)
 
         if self.policy.should_passthrough_slash_command(message):
             self._update_member_profile(message)

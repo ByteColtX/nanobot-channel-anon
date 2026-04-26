@@ -783,6 +783,87 @@ def test_kernel_enforces_allowlist_before_publish() -> None:
     asyncio.run(case())
 
 
+def test_kernel_skips_reply_backfill_for_unauthorized_message() -> None:
+    """不在 allowlist 内的 reply 消息不应触发 get_msg 回查."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        transport = RecordingTransport()
+        transport.fetched_messages["9001"] = OneBotRawEvent.model_validate(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "message_id": 9001,
+                "group_id": 456,
+                "user_id": 42,
+                "self_id": 42,
+                "message": [{"type": "text", "data": {"text": "earlier reply"}}],
+                "sender": {"user_id": 42, "nickname": "Bot"},
+                "time": 1776818315,
+            }
+        )
+        kernel = Kernel(
+            config=_config(allow_from=["private:999"]),
+            bus=bus,
+            transport=transport,
+        )
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="user-unauthorized-reply",
+                conversation=ConversationRef(kind="group", id="456"),
+                sender_id="123",
+                sender_name="Alice",
+                content="got it",
+                reply_to_message_id="9001",
+            )
+        )
+
+        assert bus.inbound_size == 0
+        assert transport.get_message_calls == []
+        assert (
+            kernel.context_store.get_message(
+                ConversationRef(kind="group", id="456"),
+                "user-unauthorized-reply",
+            )
+            is None
+        )
+
+    asyncio.run(case())
+
+
+def test_kernel_skips_media_enrichment_for_unauthorized_message() -> None:
+    """不在 allowlist 内的媒体消息不应触发入站增强."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        enricher = FakeInboundMediaEnricher(
+            _group_message(content="placeholder", message_id="user-unauthorized-media")
+        )
+        kernel = Kernel(
+            config=_config(allow_from=["private:999"], group_trigger_prob=1.0),
+            bus=bus,
+            transport=RecordingTransport(),
+            inbound_media_enricher=enricher,
+        )
+
+        await kernel.handle_inbound(
+            _group_message(content="[image]", message_id="user-unauthorized-media")
+        )
+
+        assert bus.inbound_size == 0
+        assert enricher.calls == []
+        assert (
+            kernel.context_store.get_message(
+                ConversationRef(kind="group", id="456"),
+                "user-unauthorized-media",
+            )
+            is None
+        )
+
+    asyncio.run(case())
+
+
 def test_kernel_enforces_trigger_policy_before_publish() -> None:
     """未命中触发策略的群消息不应进入总线."""
 
@@ -801,8 +882,8 @@ def test_kernel_enforces_trigger_policy_before_publish() -> None:
     asyncio.run(case())
 
 
-def test_kernel_marks_reply_to_self_from_context_before_policy() -> None:
-    """回复机器人历史消息时应先标记 reply_to_self 再触发."""
+def test_kernel_marks_reply_to_self_from_context_after_allowlist() -> None:
+    """已授权消息仍应在 allowlist 之后完成 reply_to_self 判定并触发."""
 
     async def case() -> None:
         bus = MessageBus()

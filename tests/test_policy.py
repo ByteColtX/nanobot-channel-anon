@@ -36,39 +36,15 @@ def _message(
     )
 
 
-def test_allow_from_normalization_preserves_raw_ids_and_conversation_keys() -> None:
-    """allow_from 应保留标准会话键并标准化原始 ID."""
-    config = AnonConfig(allow_from=[" 123 ", " group:456 ", "456", "private:789"])
+def test_allow_from_normalization_preserves_canonical_conversation_keys() -> None:
+    """allow_from 应只保留标准会话键并做去重标准化."""
+    config = AnonConfig(allow_from=[" group:456 ", "private:789", "group:456"])
 
-    assert config.allow_from == ["123", "group:456", "456", "private:789"]
-
-
-def test_is_allowed_matches_raw_sender_id_entry() -> None:
-    """Allow checks should match raw sender IDs deterministically."""
-    policy = PolicyEngine(AnonConfig(allow_from=["123"]))
-
-    assert policy.is_allowed(_message(sender_id="123")) is True
-    assert policy.is_allowed(_message(sender_id="999")) is False
+    assert config.allow_from == ["group:456", "private:789"]
 
 
-def test_is_allowed_matches_raw_group_id_entry() -> None:
-    """Allow checks should match raw group IDs against conversation IDs."""
-    policy = PolicyEngine(AnonConfig(allow_from=["456"]))
-
-    assert policy.is_allowed(
-        _message(sender_id="999", conversation=GROUP_CONVERSATION)
-    ) is True
-    assert policy.is_allowed(
-        _message(
-            sender_id="999",
-            conversation=ConversationRef(kind="group", id="999"),
-        )
-    ) is False
-
-
-
-def test_is_allowed_matches_canonical_conversation_key_entry() -> None:
-    """Allow checks should match canonical conversation keys explicitly."""
+def test_is_allowed_matches_canonical_group_conversation_key_entry() -> None:
+    """Allow checks should match explicit group conversation keys only."""
     policy = PolicyEngine(AnonConfig(allow_from=["group:456"]))
 
     assert policy.is_allowed(
@@ -79,6 +55,18 @@ def test_is_allowed_matches_canonical_conversation_key_entry() -> None:
             sender_id="456",
             conversation=ConversationRef(kind="private", id="456"),
         )
+    ) is False
+
+
+def test_is_allowed_matches_canonical_private_conversation_key_entry() -> None:
+    """Allow checks should match explicit private conversation keys only."""
+    policy = PolicyEngine(AnonConfig(allow_from=["private:123"]))
+
+    assert policy.is_allowed(
+        _message(sender_id="999", conversation=PRIVATE_CONVERSATION)
+    ) is True
+    assert policy.is_allowed(
+        _message(sender_id="123", conversation=GROUP_CONVERSATION)
     ) is False
 
 
