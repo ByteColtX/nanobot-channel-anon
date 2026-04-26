@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import Field, field_validator
+from typing import Any, cast
+
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,4 +40,11 @@ class MCPSettings(BaseSettings):
 
 def load_settings() -> MCPSettings:
     """Load MCP runtime settings from environment variables."""
-    return MCPSettings.model_validate({})
+    try:
+        settings_cls = cast(Any, MCPSettings)
+        return settings_cls()
+    except ValidationError as exc:
+        raise RuntimeError(
+            "Missing or invalid MCP settings. Set NAPCAT_HTTP_URL, and optionally "
+            "NAPCAT_HTTP_ACCESS_TOKEN, before starting nanobot-anon-mcp."
+        ) from exc

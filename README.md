@@ -1,6 +1,6 @@
 # nanobot-channel-anon
 
-`nanobot-channel-anon` 是一个给 nanobot 使用的 QQ 频道插件，通过 NapCat 的 OneBot v11 接口接入 QQ，目标场景是 **群聊陪聊** 和 **群管理**。
+`nanobot-channel-anon` 是一个给 [nanobot](https://github.com/HKUDS/nanobot) 使用的 QQ 频道插件，通过 NapCat 的 OneBot v11 接口接入 QQ，目标场景是 **群聊** 和 **群管**。
 
 它可以把 QQ 私聊、群聊事件接入 nanobot，让机器人在群里陪聊、响应触发消息，并结合 MCP 工具完成一些常见群管操作。
 
@@ -16,29 +16,56 @@
 
 ## 安装
 
-当前建议从源码安装和使用：
+日常使用推荐直接安装已发布版本；如果你要跟进最新提交或参与开发，再使用源码方式。
+
+### uv 安装
+
+推荐优先使用 [`uv`](https://github.com/astral-sh/uv)，把 `nanobot` 主程序和本插件装到同一个 tool 环境里：
 
 ```bash
+uv tool install nanobot-ai --with nanobot-channel-anon --with-executables-from nanobot-channel-anon
+nanobot plugins list
+```
+
+### pip 安装
+
+如果你不用 `uv`，也可以在已经安装 `nanobot-ai` 的同一个 Python 环境里安装本插件：
+
+```bash
+pip install nanobot-ai nanobot-channel-anon
+nanobot plugins list
+```
+
+正常情况下应能看到名为 `Anon` 的插件，频道名为 `anon`。
+
+安装完成后，包还会提供一个 MCP server 启动命令：`nanobot-anon-mcp`。
+
+### 源码开发安装
+
+如果你是在本仓库内开发或调试，可继续使用源码方式：
+
+```bash
+git clone https://github.com/ByteColtX/nanobot-channel-anon.git
+cd nanobot-channel-anon
 uv sync --locked
-uv build
 uv run nanobot plugins list
 ```
 
-正常情况下应能看到名为 `anon` 的频道入口。
-
-> PyPI 安装方式预留：后续发布后会在这里补充。
-
 ## 快速开始
 
-### 1. 先执行 onboarding
+### 1. 初始化工作区
 
-先让 nanobot 生成配置文件和工作区：
+```bash
+nanobot onboard
+```
+
+如果你是在源码仓库里直接运行，也可以使用：
 
 ```bash
 uv run nanobot onboard
 ```
 
-### 2. 在生成的配置里启用本频道
+### 2. 在配置里启用本频道
 
 在 nanobot 配置文件中补上本频道的最小配置，例如：
 
@@ -61,6 +88,13 @@ uv run nanobot onboard
 > 注意：`allowFrom=[]` 的语义是拒绝所有人。
 
 ### 3. 启动 nanobot
+
+```bash
+nanobot gateway --config /path/to/config.json
+nanobot channels status -c /path/to/config.json
+```
+
+如果你是在源码仓库里直接运行，也可以继续使用：
 
 ```bash
 uv run nanobot gateway --config /path/to/config.json

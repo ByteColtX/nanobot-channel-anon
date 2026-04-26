@@ -52,8 +52,7 @@
     "mcpServers": {
       "napcat-qq-actions": {
         "type": "stdio",
-        "command": "python",
-        "args": ["-m", "nanobot_channel_anon.mcp.server"],
+        "command": "nanobot-anon-mcp",
         "env": {
           "NAPCAT_HTTP_URL": "http://127.0.0.1:3000",
           "NAPCAT_HTTP_ACCESS_TOKEN": "your-token"
