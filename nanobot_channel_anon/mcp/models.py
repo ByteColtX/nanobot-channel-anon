@@ -312,6 +312,120 @@ class GetFriendListRequest(ToolRequestModel):
         return value
 
 
+class GetGroupListRequest(ToolRequestModel):
+    """Request payload for NapCat /get_group_list."""
+
+    no_cache: bool = False
+
+    @field_validator("no_cache", mode="before")
+    @classmethod
+    def validate_no_cache(cls, value: Any) -> bool:
+        """Require a real boolean no_cache flag."""
+        if not isinstance(value, bool):
+            raise ToolInputError("no_cache must be a boolean")
+        return value
+
+
+class SetGroupWholeBanRequest(ToolRequestModel):
+    """Request payload for NapCat /set_group_whole_ban."""
+
+    group_id: str
+    enable: bool
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("enable", mode="before")
+    @classmethod
+    def validate_enable(cls, value: Any) -> bool:
+        """Require a real boolean enable flag."""
+        if not isinstance(value, bool):
+            raise ToolInputError("enable must be a boolean")
+        return value
+
+
+class SetGroupLeaveRequest(ToolRequestModel):
+    """Request payload for NapCat /set_group_leave."""
+
+    group_id: str
+    is_dismiss: bool = False
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("is_dismiss", mode="before")
+    @classmethod
+    def validate_is_dismiss(cls, value: Any) -> bool:
+        """Require a real boolean is_dismiss flag."""
+        if not isinstance(value, bool):
+            raise ToolInputError("is_dismiss must be a boolean")
+        return value
+
+
+class SetMsgEmojiLikeRequest(ToolRequestModel):
+    """Request payload for NapCat /set_msg_emoji_like."""
+
+    message_id: str
+    emoji_id: str
+    set: bool
+
+    @field_validator("message_id", mode="before")
+    @classmethod
+    def validate_message_id(cls, value: Any) -> str:
+        """Normalize a target message ID."""
+        return _normalize_scalar_id(value, field_name="message_id")
+
+    @field_validator("emoji_id", mode="before")
+    @classmethod
+    def validate_emoji_id(cls, value: Any) -> str:
+        """Normalize a target emoji ID."""
+        return _normalize_scalar_id(value, field_name="emoji_id")
+
+    @field_validator("set", mode="before")
+    @classmethod
+    def validate_set(cls, value: Any) -> bool:
+        """Require a real boolean set flag."""
+        if not isinstance(value, bool):
+            raise ToolInputError("set must be a boolean")
+        return value
+
+
+class DeleteFriendRequest(ToolRequestModel):
+    """Request payload for NapCat /delete_friend."""
+
+    user_id: str
+    temp_block: bool = False
+    temp_both_del: bool = False
+
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def validate_user_id(cls, value: Any) -> str:
+        """Normalize a target QQ user ID."""
+        return _normalize_scalar_id(value, field_name="user_id")
+
+    @field_validator("temp_block", mode="before")
+    @classmethod
+    def validate_temp_block(cls, value: Any) -> bool:
+        """Require a real boolean temp_block flag."""
+        if not isinstance(value, bool):
+            raise ToolInputError("temp_block must be a boolean")
+        return value
+
+    @field_validator("temp_both_del", mode="before")
+    @classmethod
+    def validate_temp_both_del(cls, value: Any) -> bool:
+        """Require a real boolean temp_both_del flag."""
+        if not isinstance(value, bool):
+            raise ToolInputError("temp_both_del must be a boolean")
+        return value
+
+
 class SetGroupCardRequest(ToolRequestModel):
     """Request payload for NapCat /set_group_card."""
 

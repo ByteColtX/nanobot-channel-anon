@@ -9,8 +9,10 @@ from typing import Any
 import aiohttp
 
 from nanobot_channel_anon.mcp.models import (
+    DeleteFriendRequest,
     DeleteMsgRequest,
     GetFriendListRequest,
+    GetGroupListRequest,
     GetGroupMemberListRequest,
     NapCatActionResult,
     NapCatActionStatus,
@@ -21,6 +23,9 @@ from nanobot_channel_anon.mcp.models import (
     SetGroupBanRequest,
     SetGroupCardRequest,
     SetGroupKickRequest,
+    SetGroupLeaveRequest,
+    SetGroupWholeBanRequest,
+    SetMsgEmojiLikeRequest,
 )
 
 
@@ -184,6 +189,64 @@ class NapCatClient:
         return await self.call(
             "get_friend_list",
             {"no_cache": request.no_cache},
+        )
+
+    async def get_group_list(
+        self,
+        request: GetGroupListRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_group_list with a validated request model."""
+        return await self.call(
+            "get_group_list",
+            {"no_cache": request.no_cache},
+        )
+
+    async def set_group_whole_ban(
+        self,
+        request: SetGroupWholeBanRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat set_group_whole_ban with a validated request model."""
+        return await self.call(
+            "set_group_whole_ban",
+            {"group_id": int(request.group_id), "enable": request.enable},
+        )
+
+    async def set_group_leave(
+        self,
+        request: SetGroupLeaveRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat set_group_leave with a validated request model."""
+        return await self.call(
+            "set_group_leave",
+            {"group_id": int(request.group_id), "is_dismiss": request.is_dismiss},
+        )
+
+    async def set_msg_emoji_like(
+        self,
+        request: SetMsgEmojiLikeRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat set_msg_emoji_like with a validated request model."""
+        return await self.call(
+            "set_msg_emoji_like",
+            {
+                "message_id": int(request.message_id),
+                "emoji_id": int(request.emoji_id),
+                "set": request.set,
+            },
+        )
+
+    async def delete_friend(
+        self,
+        request: DeleteFriendRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat delete_friend with a validated request model."""
+        return await self.call(
+            "delete_friend",
+            {
+                "user_id": int(request.user_id),
+                "temp_block": request.temp_block,
+                "temp_both_del": request.temp_both_del,
+            },
         )
 
     async def set_group_card(

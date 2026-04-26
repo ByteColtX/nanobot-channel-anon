@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 
 from nanobot_channel_anon.mcp.models import (
+    DeleteFriendRequest,
     DeleteMsgRequest,
     GetFriendListRequest,
+    GetGroupListRequest,
     GetGroupMemberListRequest,
     SendLikeRequest,
     SendPokeRequest,
@@ -15,6 +17,9 @@ from nanobot_channel_anon.mcp.models import (
     SetGroupBanRequest,
     SetGroupCardRequest,
     SetGroupKickRequest,
+    SetGroupLeaveRequest,
+    SetGroupWholeBanRequest,
+    SetMsgEmojiLikeRequest,
     ToolInputError,
 )
 
@@ -397,4 +402,184 @@ def test_set_group_card_request_rejects_invalid_card(value: object) -> None:
     with pytest.raises(ToolInputError):
         SetGroupCardRequest.from_tool_input(
             {"group_id": "123456", "user_id": "654321", "card": value}
+        )
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_get_group_list_request_accepts_boolean_no_cache(value: bool) -> None:
+    """Group list no_cache should require and preserve boolean values."""
+    request = GetGroupListRequest.from_tool_input({"no_cache": value})
+    assert request.no_cache is value
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_get_group_list_request_rejects_non_boolean_no_cache(value: object) -> None:
+    """Group list no_cache must be boolean."""
+    with pytest.raises(ToolInputError):
+        GetGroupListRequest.from_tool_input({"no_cache": value})
+
+
+@pytest.mark.parametrize(
+    ("group_id", "enable"),
+    [(123456, True), ("123456", False)],
+)
+def test_set_group_whole_ban_request_accepts_valid_fields(
+    group_id: object,
+    enable: bool,
+) -> None:
+    """Whole group ban inputs should normalize ids and preserve the flag."""
+    request = SetGroupWholeBanRequest.from_tool_input(
+        {"group_id": group_id, "enable": enable}
+    )
+    assert request.group_id == "123456"
+    assert request.enable is enable
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_set_group_whole_ban_request_rejects_invalid_group_id(value: object) -> None:
+    """Whole group ban group_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        SetGroupWholeBanRequest.from_tool_input({"group_id": value, "enable": True})
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_set_group_whole_ban_request_rejects_non_boolean_enable(
+    value: object,
+) -> None:
+    """Whole group ban enable must be boolean."""
+    with pytest.raises(ToolInputError):
+        SetGroupWholeBanRequest.from_tool_input(
+            {"group_id": "123456", "enable": value}
+        )
+
+
+@pytest.mark.parametrize(
+    ("group_id", "is_dismiss"),
+    [(123456, False), ("123456", True)],
+)
+def test_set_group_leave_request_accepts_valid_fields(
+    group_id: object,
+    is_dismiss: bool,
+) -> None:
+    """Group leave inputs should normalize ids and preserve the flag."""
+    request = SetGroupLeaveRequest.from_tool_input(
+        {"group_id": group_id, "is_dismiss": is_dismiss}
+    )
+    assert request.group_id == "123456"
+    assert request.is_dismiss is is_dismiss
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_set_group_leave_request_rejects_invalid_group_id(value: object) -> None:
+    """Group leave group_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        SetGroupLeaveRequest.from_tool_input(
+            {"group_id": value, "is_dismiss": False}
+        )
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_set_group_leave_request_rejects_non_boolean_is_dismiss(
+    value: object,
+) -> None:
+    """Group leave is_dismiss must be boolean."""
+    with pytest.raises(ToolInputError):
+        SetGroupLeaveRequest.from_tool_input(
+            {"group_id": "123456", "is_dismiss": value}
+        )
+
+
+@pytest.mark.parametrize(
+    ("message_id", "emoji_id", "set"),
+    [(123456, 666, True), ("123456", "666", False)],
+)
+def test_set_msg_emoji_like_request_accepts_valid_fields(
+    message_id: object,
+    emoji_id: object,
+    set: bool,
+) -> None:
+    """Emoji-like inputs should normalize ids and preserve the flag."""
+    request = SetMsgEmojiLikeRequest.from_tool_input(
+        {"message_id": message_id, "emoji_id": emoji_id, "set": set}
+    )
+    assert request.message_id == "123456"
+    assert request.emoji_id == "666"
+    assert request.set is set
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_set_msg_emoji_like_request_rejects_invalid_message_id(value: object) -> None:
+    """Emoji-like message_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        SetMsgEmojiLikeRequest.from_tool_input(
+            {"message_id": value, "emoji_id": "666", "set": True}
+        )
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_set_msg_emoji_like_request_rejects_invalid_emoji_id(value: object) -> None:
+    """Emoji-like emoji_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        SetMsgEmojiLikeRequest.from_tool_input(
+            {"message_id": "123456", "emoji_id": value, "set": True}
+        )
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_set_msg_emoji_like_request_rejects_non_boolean_set(value: object) -> None:
+    """Emoji-like set must be boolean."""
+    with pytest.raises(ToolInputError):
+        SetMsgEmojiLikeRequest.from_tool_input(
+            {"message_id": "123456", "emoji_id": "666", "set": value}
+        )
+
+
+@pytest.mark.parametrize(
+    ("user_id", "temp_block", "temp_both_del"),
+    [(123456, False, False), ("123456", True, True)],
+)
+def test_delete_friend_request_accepts_valid_fields(
+    user_id: object,
+    temp_block: bool,
+    temp_both_del: bool,
+) -> None:
+    """Delete friend inputs should normalize ids and preserve flags."""
+    request = DeleteFriendRequest.from_tool_input(
+        {
+            "user_id": user_id,
+            "temp_block": temp_block,
+            "temp_both_del": temp_both_del,
+        }
+    )
+    assert request.user_id == "123456"
+    assert request.temp_block is temp_block
+    assert request.temp_both_del is temp_both_del
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_delete_friend_request_rejects_invalid_user_id(value: object) -> None:
+    """Delete friend user_id must be numeric."""
+    with pytest.raises(ToolInputError):
+        DeleteFriendRequest.from_tool_input(
+            {"user_id": value, "temp_block": False, "temp_both_del": False}
+        )
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_delete_friend_request_rejects_non_boolean_temp_block(value: object) -> None:
+    """Delete friend temp_block must be boolean."""
+    with pytest.raises(ToolInputError):
+        DeleteFriendRequest.from_tool_input(
+            {"user_id": "123456", "temp_block": value, "temp_both_del": False}
+        )
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_delete_friend_request_rejects_non_boolean_temp_both_del(
+    value: object,
+) -> None:
+    """Delete friend temp_both_del must be boolean."""
+    with pytest.raises(ToolInputError):
+        DeleteFriendRequest.from_tool_input(
+            {"user_id": "123456", "temp_block": False, "temp_both_del": value}
         )
