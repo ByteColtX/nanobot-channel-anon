@@ -10,6 +10,7 @@ from aiohttp import web
 
 from nanobot_channel_anon.mcp.models import (
     DeleteMsgRequest,
+    GetGroupMemberListRequest,
     SendLikeRequest,
     SendPokeRequest,
     SetFriendAddRequestRequest,
@@ -428,6 +429,74 @@ def test_send_like_raises_for_failure_payload() -> None:
         try:
             with pytest.raises(NapCatAPIError, match="send_like"):
                 await client.send_like(SendLikeRequest(user_id="123456", times=10))
+        finally:
+            await server.close()
+
+    asyncio.run(case())
+
+
+def test_get_group_member_list_request_includes_group_id_and_no_cache() -> None:
+    """Group member list should post group_id and no_cache."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={
+                "status": "ok",
+                "retcode": 0,
+                "data": [
+                    {
+                        "group_id": 123456,
+                        "user_id": 123456789,
+                        "nickname": "昵称",
+                        "card": "名片",
+                        "role": "member",
+                    }
+                ],
+                "message": "",
+                "wording": "",
+                "stream": "normal-action",
+            }
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            response = await client.get_group_member_list(
+                GetGroupMemberListRequest(group_id="123456", no_cache=True)
+            )
+        finally:
+            await server.close()
+
+        assert response.status.value == "ok"
+        assert server.requests == [
+            {
+                "action": "get_group_member_list",
+                "body": {"group_id": 123456, "no_cache": True},
+            }
+        ]
+
+    asyncio.run(case())
+
+
+def test_get_group_member_list_raises_for_failure_payload() -> None:
+    """Group member list failures should surface the NapCat action name."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={
+                "status": "failed",
+                "retcode": 1404,
+                "data": None,
+                "message": "群不存在",
+                "wording": "群不存在",
+            }
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            with pytest.raises(NapCatAPIError, match="get_group_member_list"):
+                await client.get_group_member_list(
+                    GetGroupMemberListRequest(group_id="123456", no_cache=True)
+                )
         finally:
             await server.close()
 

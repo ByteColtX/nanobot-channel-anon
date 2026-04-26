@@ -10,6 +10,7 @@ import aiohttp
 
 from nanobot_channel_anon.mcp.models import (
     DeleteMsgRequest,
+    GetGroupMemberListRequest,
     NapCatActionResult,
     NapCatActionStatus,
     SendLikeRequest,
@@ -131,4 +132,14 @@ class NapCatClient:
         return await self.call(
             "send_like",
             {"user_id": int(request.user_id), "times": request.times},
+        )
+
+    async def get_group_member_list(
+        self,
+        request: GetGroupMemberListRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_group_member_list with a validated request model."""
+        return await self.call(
+            "get_group_member_list",
+            {"group_id": int(request.group_id), "no_cache": request.no_cache},
         )

@@ -6,6 +6,7 @@ import pytest
 
 from nanobot_channel_anon.mcp.models import (
     DeleteMsgRequest,
+    GetGroupMemberListRequest,
     SendLikeRequest,
     SendPokeRequest,
     SetFriendAddRequestRequest,
@@ -75,6 +76,47 @@ def test_send_like_request_rejects_invalid_times(value: object) -> None:
     """Invalid like counts should raise a tool input error."""
     with pytest.raises(ToolInputError):
         SendLikeRequest.from_tool_input({"user_id": "123", "times": value})
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(123456, "123456"), ("123456", "123456"), (" 123456 ", "123456")],
+)
+def test_get_group_member_list_request_accepts_numeric_group_id(
+    value: object,
+    expected: str,
+) -> None:
+    """Group ids should normalize to trimmed digit strings."""
+    request = GetGroupMemberListRequest.from_tool_input({"group_id": value})
+    assert request.group_id == expected
+    assert request.no_cache is False
+
+
+@pytest.mark.parametrize("value", ["", "abc", "123abc", True, None])
+def test_get_group_member_list_request_rejects_invalid_group_id(value: object) -> None:
+    """Invalid group ids should raise a tool input error."""
+    with pytest.raises(ToolInputError):
+        GetGroupMemberListRequest.from_tool_input({"group_id": value})
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_get_group_member_list_request_accepts_boolean_no_cache(value: bool) -> None:
+    """no_cache should require and preserve boolean values."""
+    request = GetGroupMemberListRequest.from_tool_input(
+        {"group_id": "123", "no_cache": value}
+    )
+    assert request.no_cache is value
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_get_group_member_list_request_rejects_non_boolean_no_cache(
+    value: object,
+) -> None:
+    """Non-boolean no_cache values should raise a tool input error."""
+    with pytest.raises(ToolInputError):
+        GetGroupMemberListRequest.from_tool_input(
+            {"group_id": "123", "no_cache": value}
+        )
 
 
 @pytest.mark.parametrize(

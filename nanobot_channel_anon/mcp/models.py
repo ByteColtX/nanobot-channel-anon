@@ -140,6 +140,27 @@ class DeleteMsgRequest(ToolRequestModel):
         return _normalize_scalar_id(value, field_name="message_id")
 
 
+class GetGroupMemberListRequest(ToolRequestModel):
+    """Request payload for NapCat /get_group_member_list."""
+
+    group_id: str
+    no_cache: bool = False
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("no_cache", mode="before")
+    @classmethod
+    def validate_no_cache(cls, value: Any) -> bool:
+        """Require a real boolean no_cache flag."""
+        if not isinstance(value, bool):
+            raise ToolInputError("no_cache must be a boolean")
+        return value
+
+
 class SetGroupAddRequestRequest(ToolRequestModel):
     """Request payload for NapCat /set_group_add_request."""
 

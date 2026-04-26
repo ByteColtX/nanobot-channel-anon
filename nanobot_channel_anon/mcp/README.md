@@ -10,11 +10,12 @@
 
 当前已实现的工具：
 
-- `qq_delete_msg`
-- `qq_send_poke`
-- `qq_send_like`
-- `qq_set_group_add_request`
-- `qq_set_friend_add_request`
+- `delete_msg`：撤回消息
+- `send_poke`：发送戳一戳
+- `send_like`：发送点赞
+- `set_group_add_request`：处理加群请求或群邀请
+- `set_friend_add_request`：处理好友请求
+- `get_group_member_list`：获取群成员列表
 
 大致结构：
 
@@ -41,11 +42,12 @@
           "NAPCAT_HTTP_ACCESS_TOKEN": "your-token"
         },
         "enabledTools": [
-          "qq_delete_msg",
-          "qq_send_poke",
-          "qq_send_like",
-          "qq_set_group_add_request",
-          "qq_set_friend_add_request"
+          "delete_msg",
+          "send_poke",
+          "send_like",
+          "set_group_add_request",
+          "set_friend_add_request",
+          "get_group_member_list"
         ]
       }
     }
