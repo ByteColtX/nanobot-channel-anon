@@ -11,6 +11,7 @@ import aiohttp
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.domain import Attachment, ConversationRef, NormalizedMessage
 from nanobot_channel_anon.inbound_media import InboundMediaEnricher
+from nanobot_channel_anon.utils import parse_forward_expanded_slots
 
 
 class StubInboundMediaEnricher(InboundMediaEnricher):
@@ -283,6 +284,73 @@ def test_enricher_downloads_forward_node_image_into_forward_expanded() -> None:
     assert local_path.name == "forward-image.png"
     assert local_path.as_uri() == attachment["metadata"]["local_file_uri"]
     assert attachment["metadata"]["cache_name"] == "forward-image.png"
+
+
+def test_enricher_ignores_invalid_forward_expanded_slot() -> None:
+    """坏的 forward_expanded 槽位不应让 enrich 整体失败."""
+    enricher = StubInboundMediaEnricher(config=_config())
+    message = _message(
+        content="[forward]",
+        attachments=[],
+        metadata={
+            "forward_expanded": [
+                {"forward_id": "bad", "summary": 123, "nodes": "oops"}
+            ]
+        },
+    )
+
+    enriched = asyncio.run(enricher.enrich(message))
+
+    assert enriched.metadata == message.metadata
+
+
+def test_enricher_keeps_valid_forward_expanded_slot_when_mixed_with_invalid() -> None:
+    """Mixed valid/invalid forward_expanded 槽位时应仍增强合法节点."""
+    enricher = StubInboundMediaEnricher(config=_config())
+    enricher.materialized = (Path("/tmp/mixed-forward-image.png"), {"file_size": "123"})
+    message = _message(
+        content="[forward][forward]",
+        attachments=[],
+        metadata={
+            "forward_expanded": [
+                {
+                    "forward_id": "fw-1",
+                    "summary": "",
+                    "nodes": [
+                        {
+                            "sender_id": "123456",
+                            "sender_name": "香港奶龙",
+                            "message_id": "node-4",
+                            "content": "[image]",
+                            "attachments": [
+                                {
+                                    "kind": "image",
+                                    "url": "https://example.com/valid.png",
+                                    "name": "valid.png",
+                                    "metadata": {"file_size": "123"},
+                                }
+                            ],
+                        }
+                    ],
+                },
+                {"forward_id": "bad", "summary": 123, "nodes": "oops"},
+            ]
+        },
+    )
+
+    enriched = asyncio.run(enricher.enrich(message))
+
+    forward_expanded = enriched.metadata["forward_expanded"]
+    assert isinstance(forward_expanded, list)
+    node = forward_expanded[0]["nodes"][0]
+    attachment = node["attachments"][0]
+    local_path = Path(str(attachment["metadata"]["local_path"]))
+    assert attachment["metadata"]["download_status"] == "downloaded"
+    assert local_path.name == "mixed-forward-image.png"
+    assert forward_expanded[1] == message.metadata["forward_expanded"][1]
+    rendered_slots = parse_forward_expanded_slots(enriched.metadata)
+    assert rendered_slots[0] is not None
+    assert rendered_slots[1] is None
 
 
 def test_materialize_attachment_reuses_existing_cache_when_file_exists() -> None:

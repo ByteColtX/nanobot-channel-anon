@@ -14,12 +14,8 @@ from nanobot.config.paths import get_media_dir
 
 from nanobot_channel_anon.adapters.onebot_media import OneBotMediaAdapter
 from nanobot_channel_anon.config import AnonConfig
-from nanobot_channel_anon.domain import (
-    Attachment,
-    ForwardExpanded,
-    ForwardNode,
-    NormalizedMessage,
-)
+from nanobot_channel_anon.domain import Attachment, ForwardNode, NormalizedMessage
+from nanobot_channel_anon.utils import parse_forward_expanded_item
 
 _MEDIA_DOWNLOAD_TIMEOUT_S = 30.0
 _FFMPEG_TIMEOUT_S = 30.0
@@ -198,7 +194,7 @@ class InboundMediaEnricher:
             if raw_item is None:
                 enriched_items.append(None)
                 continue
-            expanded = self._forward_expanded_from_item(raw_item)
+            expanded = parse_forward_expanded_item(raw_item)
             if expanded is None:
                 enriched_items.append(raw_item)
                 continue
@@ -228,15 +224,6 @@ class InboundMediaEnricher:
         updated_metadata = dict(metadata)
         updated_metadata["forward_expanded"] = enriched_items
         return updated_metadata
-
-    @staticmethod
-    def _forward_expanded_from_item(raw_item: object) -> ForwardExpanded | None:
-        """把 metadata 中的单个 forward_expanded 槽位解析成模型."""
-        if isinstance(raw_item, ForwardExpanded):
-            return raw_item
-        if not isinstance(raw_item, dict):
-            return None
-        return ForwardExpanded.model_validate(raw_item)
 
     async def _enrich_image_attachment(self, attachment: Attachment) -> Attachment:
         """下载图片到本地缓存并写回元数据."""

@@ -1692,6 +1692,58 @@ def test_kernel_forward_fetcher_preserves_outer_sender_image_and_local_reply() -
     asyncio.run(case())
 
 
+def test_kernel_publishes_when_forward_expanded_contains_invalid_slot() -> None:
+    """坏的 forward_expanded 槽位不应阻断 kernel 发布."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        enriched_message = NormalizedMessage(
+            message_id="user-forward-invalid-slot",
+            conversation=ConversationRef(kind="group", id="456"),
+            sender_id="123",
+            sender_name="Alice",
+            content="看这个[forward][forward]",
+            metadata={
+                "render_segments": [
+                    {"type": "text", "text": "看这个"},
+                    {"type": "forward"},
+                    {"type": "forward"},
+                ],
+                "forward_expanded": [
+                    {"forward_id": "fw-1", "summary": "ok", "nodes": []},
+                    {"forward_id": "bad", "summary": 123, "nodes": "oops"},
+                ],
+            },
+        )
+        enricher = FakeInboundMediaEnricher(enriched_message)
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                trigger_on_at=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=RecordingTransport(),
+            inbound_media_enricher=enricher,
+        )
+
+        await kernel.handle_inbound(
+            _group_message(
+                content="看这个[forward][forward]",
+                message_id="user-forward-invalid-slot",
+            )
+        )
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert enricher.calls == ["user-forward-invalid-slot"]
+        assert inbound.metadata["trigger_reason"] == "group_probability"
+        assert "M|user-forward-invalid-slot|u1|看这个[F:f0][forward]" in inbound.content
+        assert "F|f0|0|ok" in inbound.content
+
+    asyncio.run(case())
+
+
 def test_kernel_publishes_enriched_image_and_voice_media_refs() -> None:
     """增强后的图片和语音应作为结构化 media 传给上游."""
 

@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
 
-from pydantic import ValidationError
-
 from nanobot_channel_anon.context_store import ContextStore
 from nanobot_channel_anon.domain import (
     Attachment,
@@ -16,6 +14,7 @@ from nanobot_channel_anon.domain import (
     NormalizedMessage,
     PresentedConversation,
 )
+from nanobot_channel_anon.utils import parse_forward_expanded_slots
 
 _CTX_TRUNCATION_MARKER = "[...TRUNCATED...]"
 
@@ -632,25 +631,7 @@ class _CTXBuilder:
     def _forward_expanded_slots_from_metadata(
         metadata: dict[str, object],
     ) -> list[ForwardExpanded | None]:
-        raw_items = metadata.get("forward_expanded")
-        if not isinstance(raw_items, list):
-            return []
-        expanded: list[ForwardExpanded | None] = []
-        for item in raw_items:
-            if item is None:
-                expanded.append(None)
-                continue
-            if isinstance(item, ForwardExpanded):
-                expanded.append(item)
-                continue
-            if not isinstance(item, dict):
-                expanded.append(None)
-                continue
-            try:
-                expanded.append(ForwardExpanded.model_validate(item))
-            except ValidationError:
-                expanded.append(None)
-        return expanded
+        return parse_forward_expanded_slots(metadata)
 
     def _render_forward_container_rows(
         self,
