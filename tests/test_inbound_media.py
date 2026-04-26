@@ -239,6 +239,52 @@ def test_enricher_records_successful_voice_transcription() -> None:
     assert attachment.metadata["transcription_text"] == "你好世界"
 
 
+def test_enricher_downloads_forward_node_image_into_forward_expanded() -> None:
+    """Forward 节点内图片也应被下载并写回 local_path."""
+    enricher = StubInboundMediaEnricher(config=_config())
+    enricher.materialized = (Path("/tmp/forward-image.png"), {"file_size": "123"})
+    message = _message(
+        content="[forward]",
+        attachments=[],
+        metadata={
+            "forward_expanded": [
+                {
+                    "forward_id": "fw-1",
+                    "summary": "",
+                    "nodes": [
+                        {
+                            "sender_id": "123456",
+                            "sender_name": "香港奶龙",
+                            "message_id": "node-4",
+                            "content": "[image]",
+                            "attachments": [
+                                {
+                                    "kind": "image",
+                                    "url": "https://example.com/09D75D4956CA5B4C21139F1701173408.png",
+                                    "name": "09D75D4956CA5B4C21139F1701173408.png",
+                                    "metadata": {"file_size": "123"},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    enriched = __import__("asyncio").run(enricher.enrich(message))
+
+    forward_expanded = enriched.metadata["forward_expanded"]
+    assert isinstance(forward_expanded, list)
+    node = forward_expanded[0]["nodes"][0]
+    attachment = node["attachments"][0]
+    local_path = Path(str(attachment["metadata"]["local_path"]))
+    assert attachment["metadata"]["download_status"] == "downloaded"
+    assert local_path.name == "forward-image.png"
+    assert local_path.as_uri() == attachment["metadata"]["local_file_uri"]
+    assert attachment["metadata"]["cache_name"] == "forward-image.png"
+
+
 def test_materialize_attachment_reuses_existing_cache_when_file_exists() -> None:
     """已有同名缓存文件时应直接复用, 不再下载."""
     enricher = InboundMediaEnricher(config=_config())

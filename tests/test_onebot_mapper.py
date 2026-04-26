@@ -363,6 +363,48 @@ def test_build_forward_node_preserves_outer_sender_image_and_reply() -> None:
     assert node.attachments[0].name == "image_name.png"
 
 
+def test_build_forward_node_maps_clean_upstream_message_shape() -> None:
+    """Forward node should parse clean upstream OneBot message payloads."""
+    node = OneBotMapper.build_forward_node(
+        {
+            "user_id": "123456",
+            "message_id": "node-4",
+            "sender": {"user_id": "123456", "nickname": "香港奶龙", "card": ""},
+            "message": [
+                {"type": "reply", "data": {"id": "node-3"}},
+                {
+                    "type": "image",
+                    "data": {
+                        "file": "09D75D4956CA5B4C21139F1701173408.png",
+                        "url": "https://example.com/09D75D4956CA5B4C21139F1701173408.png",
+                        "file_size": "213298",
+                    },
+                },
+            ],
+        }
+    )
+
+    assert node.sender_id == "123456"
+    assert node.sender_name == "香港奶龙"
+    assert node.message_id == "node-4"
+    assert node.reply_to_message_id == "node-3"
+    assert node.content == "[image]"
+    assert node.attachments == [
+        Attachment(
+            kind="image",
+            url="https://example.com/09D75D4956CA5B4C21139F1701173408.png",
+            name="09D75D4956CA5B4C21139F1701173408.png",
+            metadata={
+                "source": "message_segment",
+                "onebot_segment_type": "image",
+                "original_url": "https://example.com/09D75D4956CA5B4C21139F1701173408.png",
+                "original_file": "09D75D4956CA5B4C21139F1701173408.png",
+                "file_size": "213298",
+            },
+        )
+    ]
+
+
 def test_map_outbound_request_keeps_image_mixed_with_text() -> None:
     """图片可与文本共用同一个 OneBot 发送请求."""
     mapper = OneBotMapper(self_id="42")

@@ -463,11 +463,7 @@ class OneBotMapper:
     def build_forward_node(node: dict[str, Any]) -> ForwardNode:
         """构建一条可渲染的浅层转发节点."""
         raw_node = OneBotMapper._unwrap_forward_node(node)
-        content_source = (
-            raw_node.get("content")
-            if raw_node.get("content") is not None
-            else raw_node.get("message")
-        )
+        content_source = OneBotMapper._forward_content_source(node, raw_node)
         text_content, attachments = OneBotMapper._parse_forward_content(
             content_source
         )
@@ -480,26 +476,26 @@ class OneBotMapper:
             inner_sender_raw if isinstance(inner_sender_raw, dict) else {}
         )
         sender_id = normalize_onebot_id(
-            raw_node.get("user_id")
-            or raw_node.get("uin")
-            or raw_node.get("sender_id")
+            outer_sender.get("user_id")
             or node.get("user_id")
             or node.get("uin")
             or node.get("sender_id")
             or inner_sender.get("user_id")
-            or outer_sender.get("user_id")
+            or raw_node.get("user_id")
+            or raw_node.get("uin")
+            or raw_node.get("sender_id")
         )
         sender_name = (
-            _string_value(raw_node.get("nickname"))
-            or _string_value(raw_node.get("name"))
-            or _string_value(raw_node.get("sender_name"))
+            _string_value(outer_sender.get("card"))
+            or _string_value(outer_sender.get("nickname"))
             or _string_value(node.get("nickname"))
             or _string_value(node.get("name"))
             or _string_value(node.get("sender_name"))
             or _string_value(inner_sender.get("card"))
             or _string_value(inner_sender.get("nickname"))
-            or _string_value(outer_sender.get("card"))
-            or _string_value(outer_sender.get("nickname"))
+            or _string_value(raw_node.get("nickname"))
+            or _string_value(raw_node.get("name"))
+            or _string_value(raw_node.get("sender_name"))
             or sender_id
             or ""
         )
@@ -507,12 +503,14 @@ class OneBotMapper:
             sender_id=sender_id or "",
             sender_name=sender_name,
             message_id=normalize_onebot_id(
-                raw_node.get("message_id")
-                or raw_node.get("id")
-                or node.get("message_id")
+                node.get("message_id")
                 or node.get("id")
+                or raw_node.get("message_id")
+                or raw_node.get("id")
             ),
-            reply_to_message_id=OneBotMapper._forward_reply_to_message_id(raw_node),
+            reply_to_message_id=OneBotMapper._forward_reply_to_message_id(
+                content_source
+            ),
             content=text_content,
             attachments=attachments,
         )
@@ -525,12 +523,20 @@ class OneBotMapper:
         return node
 
     @staticmethod
-    def _forward_reply_to_message_id(node: dict[str, Any]) -> str | None:
-        content = (
-            node.get("content")
-            if node.get("content") is not None
-            else node.get("message")
-        )
+    def _forward_content_source(
+        node: dict[str, Any],
+        raw_node: dict[str, Any],
+    ) -> Any:
+        if node.get("content") is not None:
+            return node.get("content")
+        if node.get("message") is not None:
+            return node.get("message")
+        if raw_node.get("content") is not None:
+            return raw_node.get("content")
+        return raw_node.get("message")
+
+    @staticmethod
+    def _forward_reply_to_message_id(content: Any) -> str | None:
         for segment in OneBotMapper._segments_from_message(content):
             if segment.type != "reply":
                 continue

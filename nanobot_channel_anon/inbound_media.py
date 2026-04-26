@@ -14,7 +14,12 @@ from nanobot.config.paths import get_media_dir
 
 from nanobot_channel_anon.adapters.onebot_media import OneBotMediaAdapter
 from nanobot_channel_anon.config import AnonConfig
-from nanobot_channel_anon.domain import Attachment, NormalizedMessage
+from nanobot_channel_anon.domain import (
+    Attachment,
+    ForwardExpanded,
+    ForwardNode,
+    NormalizedMessage,
+)
 
 _MEDIA_DOWNLOAD_TIMEOUT_S = 30.0
 _FFMPEG_TIMEOUT_S = 30.0
@@ -54,21 +59,20 @@ class InboundMediaEnricher:
             return message
 
         filtered_message = self._filter_unsupported_inbound_media(message)
-        if not filtered_message.attachments:
+        enriched_attachments = await self._enrich_attachments(
+            filtered_message.attachments
+        )
+        metadata = await self._enrich_forward_expanded_metadata(
+            filtered_message.metadata
+        )
+        if (
+            enriched_attachments == filtered_message.attachments
+            and metadata == filtered_message.metadata
+        ):
             return filtered_message
-
-        enriched_attachments: list[Attachment] = []
-        for attachment in filtered_message.attachments:
-            if attachment.kind == "image":
-                enriched_attachment = await self._enrich_image_attachment(attachment)
-                enriched_attachments.append(enriched_attachment)
-                continue
-            if attachment.kind == "voice":
-                enriched_attachment = await self._enrich_voice_attachment(attachment)
-                enriched_attachments.append(enriched_attachment)
-                continue
-            enriched_attachments.append(attachment)
-        return filtered_message.model_copy(update={"attachments": enriched_attachments})
+        return filtered_message.model_copy(
+            update={"attachments": enriched_attachments, "metadata": metadata}
+        )
 
     def _filter_unsupported_inbound_media(
         self,
@@ -160,6 +164,79 @@ class InboundMediaEnricher:
                 "metadata": metadata,
             }
         )
+
+    async def _enrich_attachments(
+        self,
+        attachments: list[Attachment],
+    ) -> list[Attachment]:
+        """增强一组附件并保持顺序."""
+        enriched_attachments: list[Attachment] = []
+        for attachment in attachments:
+            if attachment.kind == "image":
+                enriched_attachment = await self._enrich_image_attachment(attachment)
+                enriched_attachments.append(enriched_attachment)
+                continue
+            if attachment.kind == "voice":
+                enriched_attachment = await self._enrich_voice_attachment(attachment)
+                enriched_attachments.append(enriched_attachment)
+                continue
+            enriched_attachments.append(attachment)
+        return enriched_attachments
+
+    async def _enrich_forward_expanded_metadata(
+        self,
+        metadata: dict[str, object],
+    ) -> dict[str, object]:
+        """增强 forward_expanded 里的节点附件."""
+        raw_items = metadata.get("forward_expanded")
+        if not isinstance(raw_items, list):
+            return metadata
+
+        changed = False
+        enriched_items: list[dict[str, object] | None] = []
+        for raw_item in raw_items:
+            if raw_item is None:
+                enriched_items.append(None)
+                continue
+            expanded = self._forward_expanded_from_item(raw_item)
+            if expanded is None:
+                enriched_items.append(raw_item)
+                continue
+            enriched_nodes: list[ForwardNode] = []
+            node_changed = False
+            for node in expanded.nodes:
+                enriched_node_attachments = await self._enrich_attachments(
+                    node.attachments
+                )
+                if enriched_node_attachments != node.attachments:
+                    node_changed = True
+                    enriched_nodes.append(
+                        node.model_copy(
+                            update={"attachments": enriched_node_attachments}
+                        )
+                    )
+                    continue
+                enriched_nodes.append(node)
+            if node_changed:
+                changed = True
+                expanded = expanded.model_copy(update={"nodes": enriched_nodes})
+                enriched_items.append(expanded.model_dump(exclude_none=True))
+                continue
+            enriched_items.append(raw_item)
+        if not changed:
+            return metadata
+        updated_metadata = dict(metadata)
+        updated_metadata["forward_expanded"] = enriched_items
+        return updated_metadata
+
+    @staticmethod
+    def _forward_expanded_from_item(raw_item: object) -> ForwardExpanded | None:
+        """把 metadata 中的单个 forward_expanded 槽位解析成模型."""
+        if isinstance(raw_item, ForwardExpanded):
+            return raw_item
+        if not isinstance(raw_item, dict):
+            return None
+        return ForwardExpanded.model_validate(raw_item)
 
     async def _enrich_image_attachment(self, attachment: Attachment) -> Attachment:
         """下载图片到本地缓存并写回元数据."""

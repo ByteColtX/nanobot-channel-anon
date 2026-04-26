@@ -1504,10 +1504,34 @@ def test_kernel_forward_fetcher_preserves_outer_sender_image_and_local_reply() -
             "messages": [
                 {
                     "data": {
-                        "message_id": "node-3",
+                        "message_id": "node-1",
+                        "user_id": "1637649901",
+                        "nickname": "千早奶龙",
+                        "content": [
+                            {
+                                "type": "video",
+                                "data": {
+                                    "file": "video.mp4",
+                                    "url": "https://example.com/video.mp4",
+                                },
+                            }
+                        ],
+                    }
+                },
+                {
+                    "data": {
+                        "message_id": "node-2",
                         "user_id": "1094950020",
                         "nickname": "囚心罪",
                         "content": [{"type": "text", "data": {"text": "🤔"}}],
+                    }
+                },
+                {
+                    "data": {
+                        "message_id": "node-3",
+                        "user_id": "1637649901",
+                        "nickname": "千早奶龙",
+                        "content": [{"type": "forward", "data": {"id": "nested-1"}}],
                     }
                 },
                 {
@@ -1518,8 +1542,8 @@ def test_kernel_forward_fetcher_preserves_outer_sender_image_and_local_reply() -
                         {
                             "type": "image",
                             "data": {
-                                "file": "image_name.png",
-                                "url": "https://example.com/image_name.png",
+                                "file": "09D75D4956CA5B4C21139F1701173408.png",
+                                "url": "https://example.com/09D75D4956CA5B4C21139F1701173408.png",
                                 "file_size": "123",
                             },
                         },
@@ -1538,6 +1562,88 @@ def test_kernel_forward_fetcher_preserves_outer_sender_image_and_local_reply() -
                 },
             ]
         }
+        enriched_message = NormalizedMessage(
+            message_id="763685243",
+            conversation=ConversationRef(kind="group", id="456"),
+            sender_id="424155717",
+            sender_name="原",
+            content="[forward]",
+            metadata={
+                "forwards": [
+                    {
+                        "forward_id": "fw-2",
+                        "summary": "",
+                        "nodes": [],
+                    }
+                ],
+                "render_segments": [{"type": "forward"}],
+                "forward_expanded": [
+                    {
+                        "forward_id": "fw-2",
+                        "summary": "",
+                        "nodes": [
+                            {
+                                "sender_id": "1637649901",
+                                "sender_name": "千早奶龙",
+                                "message_id": "node-1",
+                                "content": "[video]",
+                                "attachments": [
+                                    {
+                                        "kind": "video",
+                                        "url": "https://example.com/video.mp4",
+                                        "name": "video.mp4",
+                                        "metadata": {},
+                                    }
+                                ],
+                            },
+                            {
+                                "sender_id": "1094950020",
+                                "sender_name": "囚心罪",
+                                "message_id": "node-2",
+                                "content": "🤔",
+                                "attachments": [],
+                            },
+                            {
+                                "sender_id": "1637649901",
+                                "sender_name": "千早奶龙",
+                                "message_id": "node-3",
+                                "content": "[forward]",
+                                "attachments": [],
+                            },
+                            {
+                                "sender_id": "123456",
+                                "sender_name": "香港奶龙",
+                                "message_id": "node-4",
+                                "reply_to_message_id": "node-3",
+                                "content": "[image]",
+                                "attachments": [
+                                    {
+                                        "kind": "image",
+                                        "url": "https://example.com/09D75D4956CA5B4C21139F1701173408.png",
+                                        "name": "09D75D4956CA5B4C21139F1701173408.png",
+                                        "metadata": {
+                                            "file_size": "123",
+                                            "local_path": (
+                                                "/tmp/09D75D4956CA5B4C21139F1701173408.png"
+                                            ),
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "sender_id": "424155717",
+                                "sender_name": "原",
+                                "message_id": "node-5",
+                                "reply_to_message_id": "node-4",
+                                "content": "缓外引用测试 other",
+                                "attachments": [],
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+        enricher = FakeInboundMediaEnricher(enriched_message)
         kernel = Kernel(
             config=_config(
                 allow_from=["group:456"],
@@ -1546,6 +1652,7 @@ def test_kernel_forward_fetcher_preserves_outer_sender_image_and_local_reply() -
             ),
             bus=bus,
             transport=transport,
+            inbound_media_enricher=enricher,
         )
         kernel.state.set_self_profile(user_id="1637649901", nickname="千早奶龙")
 
@@ -1571,11 +1678,16 @@ def test_kernel_forward_fetcher_preserves_outer_sender_image_and_local_reply() -
 
         inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
 
+        assert transport.get_forward_message_calls == ["fw-2"]
+        assert enricher.calls == ["763685243"]
+        assert inbound.media == ["/tmp/09D75D4956CA5B4C21139F1701173408.png"]
         assert "U|u3|123456|香港奶龙" in inbound.content
-        assert "I|i0|image_name.png" in inbound.content
-        assert "N|0|u2|🤔" in inbound.content
-        assert "N|1|u3|^0 [i0]" in inbound.content
-        assert "N|2|u1|^1 缓外引用测试 other" in inbound.content
+        assert "I|i0|09D75D4956CA5B4C21139F1701173408.png" in inbound.content
+        assert "N|0|u0|[video]" in inbound.content
+        assert "N|1|u2|🤔" in inbound.content
+        assert "N|2|u0|[forward]" in inbound.content
+        assert "N|3|u3|^2 [i0]" in inbound.content
+        assert "N|4|u1|^3 缓外引用测试 other" in inbound.content
 
     asyncio.run(case())
 
