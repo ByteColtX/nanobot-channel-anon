@@ -357,7 +357,10 @@ def test_transport_send_requests_raises_on_failed_echo_response() -> None:
         try:
             await asyncio.wait_for(send_task, timeout=1.0)
         except RuntimeError as exc:
-            assert str(exc) == "OneBot action failed: send_private_msg"
+            assert str(exc) == (
+                "OneBot action failed: send_private_msg "
+                "status='failed' retcode=100 data=None"
+            )
         else:
             raise AssertionError("expected OneBot action failure")
 
