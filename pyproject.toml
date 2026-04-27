@@ -1,6 +1,6 @@
 [project]
 name = "nanobot-channel-anon"
-version = "0.1.5"
+version = "0.1.6"
 description = "nanobot 的 QQ 频道插件，通过 NapCat / OneBot v11 接入聊天能力"
 readme = "README.md"
 requires-python = ">=3.11"

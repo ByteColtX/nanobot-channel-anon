@@ -10,11 +10,23 @@
 
 ## 当前已实现的工具
 
-### 消息相关
+当前已实现 27 个 MCP tools。
+
+### 消息与媒体相关
 
 - `delete_msg`：撤回消息
 - `send_poke`：发送戳一戳
 - `set_msg_emoji_like`：设置消息表情回应
+- `get_friend_msg_history`：获取好友历史消息
+- `get_group_msg_history`：获取群历史消息
+- `create_flash_task`：创建闪传任务
+- `send_flash_msg`：发送闪传消息
+
+### AI 语音相关
+
+- `get_ai_characters`：获取群 AI 语音角色列表
+- `get_ai_record`：获取群 AI 语音链接
+- `send_group_ai_record`：发送群 AI 语音消息
 
 ### 账号相关
 
@@ -23,9 +35,12 @@
 - `delete_friend`：删除好友或加入黑名单
 - `send_like`：发送点赞
 
-### 群聊相关
+### 群聊与成员相关
 
 - `get_group_list`：获取群列表
+- `get_group_info`：获取群信息
+- `get_group_detail_info`：获取群详细信息
+- `get_group_member_info`：获取群成员信息
 - `get_group_member_list`：获取群成员列表
 - `set_group_add_request`：处理加群请求或群邀请
 - `set_group_ban`：设置群禁言
@@ -33,6 +48,11 @@
 - `set_group_kick`：踢出群成员
 - `set_group_card`：设置群名片
 - `set_group_leave`：退群或解散群
+
+### 群相册相关
+
+- `get_qun_album_list`：获取群相册列表
+- `upload_image_to_qun_album`：上传图片到群相册
 
 ## 大致结构
 
