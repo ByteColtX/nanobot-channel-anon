@@ -267,7 +267,13 @@ class OneBotTransport:
         """校验动作响应是否明确成功."""
         if response.status == "ok" and str(response.retcode or 0) == "0":
             return
-        raise RuntimeError(f"OneBot action failed: {request.action}")
+        raise RuntimeError(
+            "OneBot action failed: "
+            f"{request.action} "
+            f"status={response.status!r} "
+            f"retcode={response.retcode!r} "
+            f"data={response.data!r}"
+        )
 
     async def _shutdown_reader(self) -> None:
         """关闭读取循环与底层连接."""

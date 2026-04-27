@@ -452,7 +452,7 @@ def test_map_outbound_request_sends_non_image_media_standalone() -> None:
                 "group_id": 456,
                 "message": [
                     {"type": "reply", "data": {"id": "99"}},
-                    {"type": "record", "data": {"file": "file:///tmp/voice.wav"}},
+                    {"type": "text", "data": {"text": "caption"}},
                 ],
             },
             "echo": None,
@@ -461,7 +461,123 @@ def test_map_outbound_request_sends_non_image_media_standalone() -> None:
             "action": "send_group_msg",
             "params": {
                 "group_id": 456,
-                "message": [{"type": "text", "data": {"text": "caption"}}],
+                "message": [{"type": "record", "data": {"file": "file:///tmp/voice.wav"}}],
+            },
+            "echo": None,
+        },
+    ]
+
+
+def test_map_outbound_request_uses_preserved_attachment_kind() -> None:
+    """已分类附件应直接按给定 kind 构造消息段, 不再依赖 url 后缀."""
+    mapper = OneBotMapper(self_id="42")
+    request = ChannelSendRequest(
+        chat_id="group:456",
+        content="caption",
+        media=[Attachment(kind="image", url="/napcat/cache/uploaded.bin")],
+        metadata={"reply_to_message_id": "99"},
+    )
+
+    actions = mapper.map_outbound_request(request)
+
+    assert [action.model_dump(exclude_none=False) for action in actions] == [
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 456,
+                "message": [
+                    {"type": "reply", "data": {"id": "99"}},
+                    {
+                        "type": "image",
+                        "data": {"file": "/napcat/cache/uploaded.bin"},
+                    },
+                    {"type": "text", "data": {"text": "caption"}},
+                ],
+            },
+            "echo": None,
+        }
+    ]
+
+
+def test_map_outbound_request_keeps_reply_and_mention_off_standalone_voice() -> None:
+    """Reply 与正文提及应落在文本批次上, 不应挂到独立语音消息上."""
+    mapper = OneBotMapper(self_id="42")
+    request = ChannelSendRequest(
+        chat_id="group:941285969",
+        content="[CQ:reply,id=1684775664][CQ:at,qq=424155717] 发你啦~",
+        media=[Attachment(kind="voice", url="/app/.config/QQ/NapCat/temp/unravel.mp3")],
+    )
+
+    actions = mapper.map_outbound_request(request)
+
+    assert [action.model_dump(exclude_none=False) for action in actions] == [
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 941285969,
+                "message": [
+                    {"type": "reply", "data": {"id": "1684775664"}},
+                    {"type": "at", "data": {"qq": "424155717"}},
+                    {"type": "text", "data": {"text": " 发你啦~"}},
+                ],
+            },
+            "echo": None,
+        },
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 941285969,
+                "message": [
+                    {
+                        "type": "record",
+                        "data": {"file": "/app/.config/QQ/NapCat/temp/unravel.mp3"},
+                    }
+                ],
+            },
+            "echo": None,
+        },
+    ]
+
+
+def test_map_outbound_request_keeps_reply_and_mention_off_standalone_video() -> None:
+    """Reply 与正文提及应落在文本批次上, 不应挂到独立视频消息上."""
+    mapper = OneBotMapper(self_id="42")
+    request = ChannelSendRequest(
+        chat_id="group:941285969",
+        content="[CQ:reply,id=300407083][CQ:at,qq=424155717] 发你啦~",
+        media=[
+            Attachment(
+                kind="video",
+                url="/app/.config/QQ/NapCat/temp/demo.mp4",
+            )
+        ],
+    )
+
+    actions = mapper.map_outbound_request(request)
+
+    assert [action.model_dump(exclude_none=False) for action in actions] == [
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 941285969,
+                "message": [
+                    {"type": "reply", "data": {"id": "300407083"}},
+                    {"type": "at", "data": {"qq": "424155717"}},
+                    {"type": "text", "data": {"text": " 发你啦~"}},
+                ],
+            },
+            "echo": None,
+        },
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 941285969,
+                "message": [
+                    {
+                        "type": "video",
+                        "data": {"file": "/app/.config/QQ/NapCat/temp/demo.mp4"},
+                    }
+                ],
             },
             "echo": None,
         },

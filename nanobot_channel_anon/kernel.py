@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 
@@ -16,6 +17,7 @@ from nanobot_channel_anon.adapters.onebot_state import OneBotStateAdapter
 from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.context_store import ContextStore
 from nanobot_channel_anon.domain import (
+    Attachment,
     ChannelSendRequest,
     ConversationRef,
     NormalizedMessage,
@@ -516,17 +518,41 @@ class Kernel:
 
     async def _resolve_outbound_media_refs(
         self,
-        media_refs: Sequence[str],
-    ) -> list[str]:
+        media_refs: Sequence[str | Attachment],
+    ) -> list[str | Attachment]:
         """上传 request.media 中的本地媒体并返回可发送引用."""
-        resolved_refs: list[str] = []
+        resolved_refs: list[str | Attachment] = []
         for media_ref in media_refs:
             resolved_ref = await self._resolve_single_outbound_media_ref(media_ref)
             resolved_refs.append(resolved_ref)
         return resolved_refs
 
-    async def _resolve_single_outbound_media_ref(self, media_ref: str) -> str:
+    async def _resolve_single_outbound_media_ref(
+        self,
+        media_ref: str | Attachment,
+    ) -> str | Attachment:
         """按单个媒体引用决定是否需要上传."""
+        if isinstance(media_ref, Attachment):
+            normalized_media_ref = self.media.normalize_outbound_media_ref(
+                media_ref.url
+            )
+            local_path = self.media.local_path_from_media_ref(normalized_media_ref)
+            if local_path is None:
+                if normalized_media_ref == media_ref.url:
+                    return media_ref
+                return media_ref.model_copy(update={"url": normalized_media_ref})
+            uploader = self.transport
+            if not isinstance(uploader, OutboundMediaUploader):
+                raise TypeError("transport does not support upload_local_media(path)")
+            uploaded_media_ref = await uploader.upload_local_media(local_path)
+            logger.debug(
+                "Anon resolved outbound media: original_ref={} uploaded_ref={} kind={}",
+                media_ref.url,
+                uploaded_media_ref,
+                media_ref.kind,
+            )
+            return media_ref.model_copy(update={"url": uploaded_media_ref})
+
         normalized_media_ref = self.media.normalize_outbound_media_ref(media_ref)
         local_path = self.media.local_path_from_media_ref(normalized_media_ref)
         if local_path is None:
@@ -534,7 +560,15 @@ class Kernel:
         uploader = self.transport
         if not isinstance(uploader, OutboundMediaUploader):
             raise TypeError("transport does not support upload_local_media(path)")
-        return await uploader.upload_local_media(local_path)
+        uploaded_media_ref = await uploader.upload_local_media(local_path)
+        original_kind = self.media.classify_outbound_media_ref(normalized_media_ref)
+        logger.debug(
+            "Anon resolved outbound media: original_ref={} uploaded_ref={} kind={}",
+            normalized_media_ref,
+            uploaded_media_ref,
+            original_kind,
+        )
+        return Attachment(kind=original_kind, url=uploaded_media_ref)
 
     async def _resolve_inline_cq_media_refs(self, content: str) -> str:
         """上传内联 CQ 媒体里的本地文件引用并重写文本."""
@@ -564,7 +598,12 @@ class Kernel:
         if not media_ref:
             return match.group(0)
         resolved_media_ref = await self._resolve_single_outbound_media_ref(media_ref)
-        if resolved_media_ref == media_ref:
+        resolved_file_value = (
+            resolved_media_ref.url
+            if isinstance(resolved_media_ref, Attachment)
+            else resolved_media_ref
+        )
+        if resolved_file_value == media_ref:
             return match.group(0)
         rebuilt_parts: list[str] = []
         replaced = False
@@ -573,7 +612,7 @@ class Kernel:
             if not separator:
                 return match.group(0)
             if not replaced and key.strip() == "file":
-                rebuilt_parts.append(f"{key}={resolved_media_ref}")
+                rebuilt_parts.append(f"{key}={resolved_file_value}")
                 replaced = True
                 continue
             rebuilt_parts.append(f"{key}={value}")

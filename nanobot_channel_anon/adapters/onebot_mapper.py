@@ -179,9 +179,7 @@ class OneBotMapper:
         image_segments: list[OneBotMessageSegment] = []
         standalone_media_segments: list[OneBotMessageSegment] = []
         for media_ref in request.media:
-            attachment = self.media.prepare_outbound_attachment_from_media_ref(
-                media_ref
-            )
+            attachment = self._outbound_attachment_from_request_media(media_ref)
             attachment_kind = self.media.classify_segment_type(attachment.type)
             if self.media.is_mixed_message_media(attachment_kind):
                 image_segments.append(attachment)
@@ -202,9 +200,6 @@ class OneBotMapper:
             )
             reply_segment = None
 
-        for attachment in standalone_media_segments:
-            emit([attachment])
-
         mixed_segments = [*image_segments]
         for segment in content_segments:
             attachment_kind = self.media.classify_segment_type(segment.type)
@@ -222,7 +217,19 @@ class OneBotMapper:
         if mixed_segments:
             emit(mixed_segments)
 
+        for attachment in standalone_media_segments:
+            emit([attachment])
+
         return actions
+
+    def _outbound_attachment_from_request_media(
+        self,
+        media_ref: str | Attachment,
+    ) -> OneBotMessageSegment:
+        """把 request.media 中的项目转换为稳定出站媒体段."""
+        if isinstance(media_ref, Attachment):
+            return self.media.prepare_outbound_attachment(media_ref)
+        return self.media.prepare_outbound_attachment_from_media_ref(media_ref)
 
     def _map_message_event(
         self,

@@ -120,3 +120,37 @@ def test_upload_local_media_requires_file_path_in_completion() -> None:
                 await transport.upload_local_media(path)
 
     asyncio.run(case())
+
+
+def test_send_requests_raises_with_status_retcode_and_data() -> None:
+    """动作失败异常应带上 status、retcode 与 data 摘要."""
+
+    async def case() -> None:
+        transport = UploadRecordingTransport()
+        request = OneBotAPIRequest(action="send_group_msg", params={"group_id": 456})
+
+        async def fake_send_api_request(
+            action: str,
+            params: dict[str, Any] | None,
+            *,
+            request: OneBotAPIRequest | None = None,
+        ) -> OneBotRawEvent:
+            del action, params, request
+            return OneBotRawEvent(
+                status="failed",
+                retcode=1200,
+                data={"wording": "bad payload"},
+            )
+
+        transport._send_api_request = fake_send_api_request
+
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "OneBot action failed: send_group_msg "
+                "status='failed' retcode=1200 data=\\{'wording': 'bad payload'\\}"
+            ),
+        ):
+            await transport.send_requests([request])
+
+    asyncio.run(case())

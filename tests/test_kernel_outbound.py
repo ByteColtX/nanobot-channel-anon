@@ -96,10 +96,7 @@ def test_send_uses_mapper_and_transport_request_path() -> None:
                         "group_id": 456,
                         "message": [
                             {"type": "reply", "data": {"id": "99"}},
-                            {
-                                "type": "record",
-                                "data": {"file": "/napcat/cache/voice.wav"},
-                            },
+                            {"type": "text", "data": {"text": "caption"}},
                         ],
                     },
                     "echo": None,
@@ -108,7 +105,12 @@ def test_send_uses_mapper_and_transport_request_path() -> None:
                     "action": "send_group_msg",
                     "params": {
                         "group_id": 456,
-                        "message": [{"type": "text", "data": {"text": "caption"}}],
+                        "message": [
+                            {
+                                "type": "record",
+                                "data": {"file": "/napcat/cache/voice.wav"},
+                            },
+                        ],
                     },
                     "echo": None,
                 },
@@ -322,10 +324,7 @@ def test_send_uploads_local_request_media_before_mapping() -> None:
                         "group_id": 456,
                         "message": [
                             {"type": "reply", "data": {"id": "99"}},
-                            {
-                                "type": "record",
-                                "data": {"file": "/napcat/cache/voice.wav"},
-                            },
+                            {"type": "text", "data": {"text": "caption"}},
                         ],
                     },
                     "echo": None,
@@ -334,7 +333,12 @@ def test_send_uploads_local_request_media_before_mapping() -> None:
                     "action": "send_group_msg",
                     "params": {
                         "group_id": 456,
-                        "message": [{"type": "text", "data": {"text": "caption"}}],
+                        "message": [
+                            {
+                                "type": "record",
+                                "data": {"file": "/napcat/cache/voice.wav"},
+                            },
+                        ],
                     },
                     "echo": None,
                 },
@@ -380,6 +384,403 @@ def test_send_uploads_local_inline_cq_media_before_mapping() -> None:
                                 "type": "record",
                                 "data": {"file": "/napcat/cache/demo.wav"},
                             },
+                        ],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [{"type": "text", "data": {"text": "after"}}],
+                    },
+                    "echo": None,
+                },
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_preserves_image_kind_when_uploaded_path_loses_extension() -> None:
+    """本地图片上传后即使 file_path 变成 .bin 也必须继续按 image 发送."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_results["/tmp/picture.jpg"] = "/napcat/cache/uploaded.bin"
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="caption",
+                media=["/tmp/picture.jpg"],
+                metadata={"reply_to_message_id": "99"},
+            )
+        )
+
+        assert transport.upload_calls == ["/tmp/picture.jpg"]
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {"type": "reply", "data": {"id": "99"}},
+                            {
+                                "type": "image",
+                                "data": {"file": "/napcat/cache/uploaded.bin"},
+                            },
+                            {"type": "text", "data": {"text": "caption"}},
+                        ],
+                    },
+                    "echo": None,
+                }
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_preserves_voice_kind_when_uploaded_path_loses_extension() -> None:
+    """本地语音上传后即使 file_path 变成 .bin 也必须继续按 record 发送."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_results["/tmp/demo.wav"] = "/napcat/cache/uploaded.bin"
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="caption",
+                media=["/tmp/demo.wav"],
+                metadata={"reply_to_message_id": "99"},
+            )
+        )
+
+        assert transport.upload_calls == ["/tmp/demo.wav"]
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {"type": "reply", "data": {"id": "99"}},
+                            {"type": "text", "data": {"text": "caption"}},
+                        ],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {
+                                "type": "record",
+                                "data": {"file": "/napcat/cache/uploaded.bin"},
+                            },
+                        ],
+                    },
+                    "echo": None,
+                },
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_preserves_video_kind_when_uploaded_path_loses_extension() -> None:
+    """本地视频上传后即使 file_path 变成 .bin 也必须继续按 video 发送."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_results["/tmp/demo.mp4"] = "/napcat/cache/uploaded.bin"
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="caption",
+                media=["/tmp/demo.mp4"],
+                metadata={"reply_to_message_id": "99"},
+            )
+        )
+
+        assert transport.upload_calls == ["/tmp/demo.mp4"]
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {"type": "reply", "data": {"id": "99"}},
+                            {"type": "text", "data": {"text": "caption"}},
+                        ],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {
+                                "type": "video",
+                                "data": {"file": "/napcat/cache/uploaded.bin"},
+                            },
+                        ],
+                    },
+                    "echo": None,
+                },
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_preserves_inline_image_kind_when_uploaded_path_loses_extension() -> None:
+    """内联 CQ 图片上传后即使 file_path 变成 .bin 也必须继续按 image 发送."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_results["/tmp/picture.jpg"] = "/napcat/cache/uploaded.bin"
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="before[CQ:image,file=/tmp/picture.jpg]after",
+            )
+        )
+
+        assert transport.upload_calls == ["/tmp/picture.jpg"]
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {"type": "text", "data": {"text": "before"}},
+                            {
+                                "type": "image",
+                                "data": {"file": "/napcat/cache/uploaded.bin"},
+                            },
+                            {"type": "text", "data": {"text": "after"}},
+                        ],
+                    },
+                    "echo": None,
+                }
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_preserves_file_kind_when_uploaded_path_loses_extension() -> None:
+    """本地文件上传后即使 file_path 变成 .bin 也必须继续按 file 发送."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_results["/tmp/test.txt"] = "/napcat/cache/uploaded.bin"
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="caption",
+                media=["/tmp/test.txt"],
+                metadata={"reply_to_message_id": "99"},
+            )
+        )
+
+        assert transport.upload_calls == ["/tmp/test.txt"]
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {"type": "reply", "data": {"id": "99"}},
+                            {"type": "text", "data": {"text": "caption"}},
+                        ],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {
+                                "type": "file",
+                                "data": {"file": "/napcat/cache/uploaded.bin"},
+                            },
+                        ],
+                    },
+                    "echo": None,
+                },
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_preserves_inline_voice_kind_when_uploaded_path_loses_extension() -> None:
+    """内联 CQ 语音上传后即使 file_path 变成 .bin 也必须继续按 record 发送."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_results["/tmp/demo.wav"] = "/napcat/cache/uploaded.bin"
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="before[CQ:record,file=/tmp/demo.wav]after",
+            )
+        )
+
+        assert transport.upload_calls == ["/tmp/demo.wav"]
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [{"type": "text", "data": {"text": "before"}}],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {
+                                "type": "record",
+                                "data": {"file": "/napcat/cache/uploaded.bin"},
+                            }
+                        ],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [{"type": "text", "data": {"text": "after"}}],
+                    },
+                    "echo": None,
+                },
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_preserves_inline_video_kind_when_uploaded_path_loses_extension() -> None:
+    """内联 CQ 视频上传后即使 file_path 变成 .bin 也必须继续按 video 发送."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_results["/tmp/demo.mp4"] = "/napcat/cache/uploaded.bin"
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="before[CQ:video,file=/tmp/demo.mp4]after",
+            )
+        )
+
+        assert transport.upload_calls == ["/tmp/demo.mp4"]
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [{"type": "text", "data": {"text": "before"}}],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {
+                                "type": "video",
+                                "data": {"file": "/napcat/cache/uploaded.bin"},
+                            }
+                        ],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [{"type": "text", "data": {"text": "after"}}],
+                    },
+                    "echo": None,
+                },
+            ]
+        ]
+
+    asyncio.run(case())
+
+
+def test_send_preserves_inline_file_kind_when_uploaded_path_loses_extension() -> None:
+    """内联 CQ 文件上传后即使 file_path 变成 .bin 也必须继续按 file 发送."""
+
+    async def case() -> None:
+        transport = RecordingTransport()
+        transport.upload_results["/tmp/test.txt"] = "/napcat/cache/uploaded.bin"
+        kernel = Kernel(config=_config(), bus=MessageBus(), transport=transport)
+
+        await kernel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="group:456",
+                content="before[CQ:file,file=/tmp/test.txt]after",
+            )
+        )
+
+        assert transport.upload_calls == ["/tmp/test.txt"]
+        assert transport.requests == [
+            [
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [{"type": "text", "data": {"text": "before"}}],
+                    },
+                    "echo": None,
+                },
+                {
+                    "action": "send_group_msg",
+                    "params": {
+                        "group_id": 456,
+                        "message": [
+                            {
+                                "type": "file",
+                                "data": {"file": "/napcat/cache/uploaded.bin"},
+                            }
                         ],
                     },
                     "echo": None,

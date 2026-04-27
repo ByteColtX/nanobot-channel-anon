@@ -154,5 +154,8 @@ class ChannelSendRequest(BaseModel):
 
     chat_id: str = Field(description="目标会话 ID。")
     content: str = Field(default="", description="要发送的文本内容。")
-    media: list[str] = Field(default_factory=list, description="要发送的媒体引用。")
+    media: list[str | Attachment] = Field(
+        default_factory=list,
+        description="要发送的媒体引用或已分类附件。",
+    )
     metadata: dict[str, Any] = Field(default_factory=dict, description="附带元数据。")
