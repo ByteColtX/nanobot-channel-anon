@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
 import aiohttp
+from loguru import logger
 
 from nanobot_channel_anon.mcp.models import (
     DeleteFriendRequest,
@@ -31,6 +33,14 @@ from nanobot_channel_anon.mcp.models import (
 
 class NapCatAPIError(RuntimeError):
     """Raised when a NapCat API call fails."""
+
+
+def _format_log_value(value: Any, *, limit: int = 500) -> str:
+    """Render structured values into a single-line truncated log string."""
+    rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    if len(rendered) <= limit:
+        return rendered
+    return f"{rendered[:limit]}..."
 
 
 class NapCatClient:
@@ -95,6 +105,12 @@ class NapCatClient:
                 f"{action} failed: status={result.status!r} "
                 f"retcode={result.retcode!r} payload={payload!r}"
             )
+        logger.debug(
+            "NapCat MCP result: action={} params={} result={}",
+            action,
+            _format_log_value(params),
+            _format_log_value(result.model_dump(mode="json", exclude_none=True)),
+        )
         return result
 
     async def delete_msg(self, request: DeleteMsgRequest) -> NapCatActionResult:
