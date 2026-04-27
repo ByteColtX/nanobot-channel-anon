@@ -13,11 +13,14 @@ from loguru import logger
 from nanobot_channel_anon.mcp.models import (
     DeleteFriendRequest,
     DeleteMsgRequest,
+    GetAICharactersRequest,
+    GetAIRecordRequest,
     GetFriendListRequest,
     GetGroupListRequest,
     GetGroupMemberListRequest,
     NapCatActionResult,
     NapCatActionStatus,
+    SendGroupAIRecordRequest,
     SendLikeRequest,
     SendPokeRequest,
     SetFriendAddRequestRequest,
@@ -123,6 +126,47 @@ class NapCatClient:
         if request.group_id is not None:
             params["group_id"] = int(request.group_id)
         return await self.call("send_poke", params)
+
+    async def send_group_ai_record(
+        self,
+        request: SendGroupAIRecordRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat send_group_ai_record with a validated request model."""
+        return await self.call(
+            "send_group_ai_record",
+            {
+                "group_id": int(request.group_id),
+                "character": request.character,
+                "text": request.text,
+            },
+        )
+
+    async def get_ai_record(
+        self,
+        request: GetAIRecordRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_ai_record with a validated request model."""
+        return await self.call(
+            "get_ai_record",
+            {
+                "group_id": int(request.group_id),
+                "character": request.character,
+                "text": request.text,
+            },
+        )
+
+    async def get_ai_characters(
+        self,
+        request: GetAICharactersRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_ai_characters with a validated request model."""
+        return await self.call(
+            "get_ai_characters",
+            {
+                "group_id": request.group_id,
+                "chat_type": request.chat_type,
+            },
+        )
 
     async def set_group_add_request(
         self,

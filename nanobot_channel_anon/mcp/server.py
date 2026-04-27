@@ -11,10 +11,17 @@ from nanobot_channel_anon.mcp.napcat_client import NapCatClient
 from nanobot_channel_anon.mcp.settings import load_settings
 from nanobot_channel_anon.mcp.tools.delete_friend import register_delete_friend_tool
 from nanobot_channel_anon.mcp.tools.delete_msg import register_delete_msg_tool
+from nanobot_channel_anon.mcp.tools.get_ai_characters import (
+    register_get_ai_characters_tool,
+)
+from nanobot_channel_anon.mcp.tools.get_ai_record import register_get_ai_record_tool
 from nanobot_channel_anon.mcp.tools.get_friend_list import register_get_friend_list_tool
 from nanobot_channel_anon.mcp.tools.get_group_list import register_get_group_list_tool
 from nanobot_channel_anon.mcp.tools.get_group_member_list import (
     register_get_group_member_list_tool,
+)
+from nanobot_channel_anon.mcp.tools.send_group_ai_record import (
+    register_send_group_ai_record_tool,
 )
 from nanobot_channel_anon.mcp.tools.send_like import register_send_like_tool
 from nanobot_channel_anon.mcp.tools.send_poke import register_send_poke_tool
@@ -62,7 +69,10 @@ def create_server() -> FastMCP[object]:
     register_delete_msg_tool(mcp, client)
     register_delete_friend_tool(mcp, client)
     register_send_poke_tool(mcp, client)
+    register_send_group_ai_record_tool(mcp, client)
     register_send_like_tool(mcp, client)
+    register_get_ai_record_tool(mcp, client)
+    register_get_ai_characters_tool(mcp, client)
     register_get_group_member_list_tool(mcp, client)
     register_get_friend_list_tool(mcp, client)
     register_get_group_list_tool(mcp, client)

@@ -128,6 +128,32 @@ class SendLikeRequest(ToolRequestModel):
         return normalized
 
 
+class SendGroupAIRecordRequest(ToolRequestModel):
+    """Request payload for NapCat /send_group_ai_record."""
+
+    group_id: str
+    character: str
+    text: str
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("character", mode="before")
+    @classmethod
+    def validate_character(cls, value: Any) -> str:
+        """Normalize a required voice character string."""
+        return _normalize_nonempty_string(value, field_name="character")
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def validate_text(cls, value: Any) -> str:
+        """Normalize a required voice text string."""
+        return _normalize_nonempty_string(value, field_name="text")
+
+
 class DeleteMsgRequest(ToolRequestModel):
     """Request payload for NapCat /delete_msg."""
 
@@ -159,6 +185,65 @@ class GetGroupMemberListRequest(ToolRequestModel):
         if not isinstance(value, bool):
             raise ToolInputError("no_cache must be a boolean")
         return value
+
+
+class GetAIRecordRequest(ToolRequestModel):
+    """Request payload for NapCat /get_ai_record."""
+
+    group_id: str
+    character: str
+    text: str
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("character", mode="before")
+    @classmethod
+    def validate_character(cls, value: Any) -> str:
+        """Normalize a required AI voice character."""
+        return _normalize_nonempty_string(value, field_name="character")
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def validate_text(cls, value: Any) -> str:
+        """Normalize a required AI voice text input."""
+        return _normalize_nonempty_string(value, field_name="text")
+
+
+class GetAICharactersRequest(ToolRequestModel):
+    """Request payload for NapCat /get_ai_characters."""
+
+    group_id: str
+    chat_type: int = 1
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("chat_type", mode="before")
+    @classmethod
+    def validate_chat_type(cls, value: Any) -> int:
+        """Normalize a positive chat type integer."""
+        if isinstance(value, bool):
+            raise ToolInputError("chat_type must be a positive integer")
+        if isinstance(value, int):
+            normalized = value
+        elif isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or not stripped.isdigit():
+                raise ToolInputError("chat_type must be a positive integer")
+            normalized = int(stripped)
+        else:
+            raise ToolInputError("chat_type must be a positive integer")
+
+        if normalized <= 0:
+            raise ToolInputError("chat_type must be a positive integer")
+        return normalized
 
 
 class SetGroupAddRequestRequest(ToolRequestModel):
