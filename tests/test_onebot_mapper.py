@@ -674,6 +674,63 @@ def test_map_outbound_request_splits_inline_non_image_cq_media() -> None:
 
 
 
+def test_map_outbound_request_splits_inline_contact_cq() -> None:
+    """内联 contact CQ 与其他内容混发时应拆成独立请求."""
+    mapper = OneBotMapper(self_id="42")
+    request = ChannelSendRequest(
+        chat_id="group:456",
+        content=(
+            "before[CQ:contact,type=qq,id=424155717]"
+            "after[CQ:image,file=https://example.com/a.png]"
+        ),
+        metadata={"reply_to_message_id": "99"},
+    )
+
+    actions = mapper.map_outbound_request(request)
+
+    assert [action.model_dump(exclude_none=False) for action in actions] == [
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 456,
+                "message": [
+                    {"type": "reply", "data": {"id": "99"}},
+                    {"type": "text", "data": {"text": "before"}},
+                ],
+            },
+            "echo": None,
+        },
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 456,
+                "message": [
+                    {
+                        "type": "contact",
+                        "data": {"type": "qq", "id": "424155717"},
+                    },
+                ],
+            },
+            "echo": None,
+        },
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 456,
+                "message": [
+                    {"type": "text", "data": {"text": "after"}},
+                    {
+                        "type": "image",
+                        "data": {"file": "https://example.com/a.png"},
+                    },
+                ],
+            },
+            "echo": None,
+        },
+    ]
+
+
+
 def test_map_outbound_request_keeps_unsupported_inline_cq_as_text() -> None:
     """不支持的内联 CQ 应保留为普通文本."""
     mapper = OneBotMapper(self_id="42")

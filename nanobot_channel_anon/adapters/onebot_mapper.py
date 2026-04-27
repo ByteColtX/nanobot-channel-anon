@@ -77,6 +77,18 @@ def _build_inline_cq_segment(
         if _VALID_NUMERIC_ID_PATTERN.fullmatch(message_id):
             return OneBotMessageSegment(type="reply", data={"id": message_id})
         return None
+    if normalized_type == "contact":
+        contact_type = params.get("type", "").strip().lower()
+        contact_id = params.get("id", "").strip()
+        if (
+            contact_type in {"qq", "group"}
+            and _VALID_NUMERIC_ID_PATTERN.fullmatch(contact_id)
+        ):
+            return OneBotMessageSegment(
+                type="contact",
+                data={"type": contact_type, "id": contact_id},
+            )
+        return None
     if normalized_type in {"image", "record", "video", "file"}:
         media_ref = params.get("file", "").strip()
         if not media_ref:
@@ -202,6 +214,12 @@ class OneBotMapper:
 
         mixed_segments = [*image_segments]
         for segment in content_segments:
+            if segment.type == "contact":
+                if mixed_segments:
+                    emit(mixed_segments)
+                    mixed_segments = []
+                emit([segment])
+                continue
             attachment_kind = self.media.classify_segment_type(segment.type)
             if attachment_kind == "unknown":
                 mixed_segments.append(segment)
