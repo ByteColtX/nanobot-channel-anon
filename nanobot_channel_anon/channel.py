@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -15,6 +16,13 @@ from nanobot_channel_anon.config import AnonConfig
 from nanobot_channel_anon.inbound_forward import InboundForwardEnricher
 from nanobot_channel_anon.inbound_media import InboundMediaEnricher
 from nanobot_channel_anon.kernel import Kernel
+
+_BLOCKED_UPSTREAM_OUTBOUND_PATTERNS = (
+    re.compile(r"^Error:"),
+    re.compile(r"^Error calling LLM:"),
+    re.compile(r"^Sorry, I encountered an error(?: calling the AI model)?\."),
+    re.compile(r"^I reached the maximum number of tool call iterations \(\d+\) "),
+)
 
 
 class AnonChannel(BaseChannel):
@@ -61,8 +69,22 @@ class AnonChannel(BaseChannel):
         await self._kernel.stop()
         self._running = False
 
+    @staticmethod
+    def _should_drop_upstream_outbound(content: str, *, has_media: bool) -> bool:
+        """按最小规则拦截上游错误文本出站."""
+        if has_media:
+            return False
+        normalized = content.strip()
+        if not normalized:
+            return False
+        return any(
+            pattern.match(normalized) for pattern in _BLOCKED_UPSTREAM_OUTBOUND_PATTERNS
+        )
+
     async def send(self, msg: OutboundMessage) -> None:
         """发送消息并委托给内核."""
+        if self._should_drop_upstream_outbound(msg.content, has_media=bool(msg.media)):
+            return
         await self._kernel.send(msg)
 
     async def send_delta(
@@ -72,6 +94,8 @@ class AnonChannel(BaseChannel):
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """按普通文本消息发送增量内容."""
+        if self._should_drop_upstream_outbound(delta, has_media=False):
+            return
         await self._kernel.send_delta(chat_id, delta, metadata)
 
     def _build_kernel(self, config: AnonConfig, bus: MessageBus) -> Kernel:

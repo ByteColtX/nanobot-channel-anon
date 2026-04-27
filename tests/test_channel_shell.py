@@ -84,3 +84,97 @@ def test_channel_shell_delegates_all_public_methods() -> None:
         assert kernel.deltas == [("private:1", "delta", {"stream": True})]
 
     asyncio.run(case())
+
+
+
+def test_channel_shell_drops_upstream_error_text() -> None:
+    """上游错误文本应在 channel 外壳层被拦截."""
+
+    async def case() -> None:
+        kernel = RecordingKernel()
+
+        def kernel_factory(config: AnonConfig, bus: MessageBus) -> RecordingKernel:
+            del config, bus
+            return kernel
+
+        channel = AnonChannel(
+            {"ws_url": "ws://127.0.0.1:3001"},
+            MessageBus(),
+            kernel_factory=kernel_factory,
+        )
+
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content="Error: API returned empty choices.",
+            )
+        )
+        await channel.send_delta("private:1", "Error calling LLM: timeout")
+
+        assert kernel.sent == []
+        assert kernel.deltas == []
+
+    asyncio.run(case())
+
+
+
+def test_channel_shell_allows_normal_text() -> None:
+    """普通文本不应被最小错误拦截规则误伤."""
+
+    async def case() -> None:
+        kernel = RecordingKernel()
+
+        def kernel_factory(config: AnonConfig, bus: MessageBus) -> RecordingKernel:
+            del config, bus
+            return kernel
+
+        channel = AnonChannel(
+            {"ws_url": "ws://127.0.0.1:3001"},
+            MessageBus(),
+            kernel_factory=kernel_factory,
+        )
+
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content="Restarting...",
+            )
+        )
+
+        assert [msg.content for msg in kernel.sent] == ["Restarting..."]
+
+    asyncio.run(case())
+
+
+
+def test_channel_shell_allows_error_text_with_media() -> None:
+    """带媒体的消息不应仅因文本前缀命中而被丢弃."""
+
+    async def case() -> None:
+        kernel = RecordingKernel()
+
+        def kernel_factory(config: AnonConfig, bus: MessageBus) -> RecordingKernel:
+            del config, bus
+            return kernel
+
+        channel = AnonChannel(
+            {"ws_url": "ws://127.0.0.1:3001"},
+            MessageBus(),
+            kernel_factory=kernel_factory,
+        )
+
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content="Error: screenshot upload failed",
+                media=["https://example.com/demo.png"],
+            )
+        )
+
+        assert len(kernel.sent) == 1
+        assert kernel.sent[0].media == ["https://example.com/demo.png"]
+
+    asyncio.run(case())
