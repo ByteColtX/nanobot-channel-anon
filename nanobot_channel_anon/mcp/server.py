@@ -16,9 +16,19 @@ from nanobot_channel_anon.mcp.tools.get_ai_characters import (
 )
 from nanobot_channel_anon.mcp.tools.get_ai_record import register_get_ai_record_tool
 from nanobot_channel_anon.mcp.tools.get_friend_list import register_get_friend_list_tool
+from nanobot_channel_anon.mcp.tools.get_group_detail_info import (
+    register_get_group_detail_info_tool,
+)
+from nanobot_channel_anon.mcp.tools.get_group_info import register_get_group_info_tool
 from nanobot_channel_anon.mcp.tools.get_group_list import register_get_group_list_tool
+from nanobot_channel_anon.mcp.tools.get_group_member_info import (
+    register_get_group_member_info_tool,
+)
 from nanobot_channel_anon.mcp.tools.get_group_member_list import (
     register_get_group_member_list_tool,
+)
+from nanobot_channel_anon.mcp.tools.get_qun_album_list import (
+    register_get_qun_album_list_tool,
 )
 from nanobot_channel_anon.mcp.tools.send_group_ai_record import (
     register_send_group_ai_record_tool,
@@ -40,6 +50,9 @@ from nanobot_channel_anon.mcp.tools.set_group_whole_ban import (
 )
 from nanobot_channel_anon.mcp.tools.set_msg_emoji_like import (
     register_set_msg_emoji_like_tool,
+)
+from nanobot_channel_anon.mcp.tools.upload_image_to_qun_album import (
+    register_upload_image_to_qun_album_tool,
 )
 
 
@@ -73,9 +86,14 @@ def create_server() -> FastMCP[object]:
     register_send_like_tool(mcp, client)
     register_get_ai_record_tool(mcp, client)
     register_get_ai_characters_tool(mcp, client)
+    register_get_group_info_tool(mcp, client)
+    register_get_group_detail_info_tool(mcp, client)
+    register_get_group_member_info_tool(mcp, client)
     register_get_group_member_list_tool(mcp, client)
     register_get_friend_list_tool(mcp, client)
     register_get_group_list_tool(mcp, client)
+    register_get_qun_album_list_tool(mcp, client)
+    register_upload_image_to_qun_album_tool(mcp, client)
     register_set_group_add_request_tool(mcp, client)
     register_set_friend_add_request_tool(mcp, client)
     register_set_group_ban_tool(mcp, client)

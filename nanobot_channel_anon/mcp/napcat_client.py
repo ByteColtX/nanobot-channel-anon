@@ -16,8 +16,12 @@ from nanobot_channel_anon.mcp.models import (
     GetAICharactersRequest,
     GetAIRecordRequest,
     GetFriendListRequest,
+    GetGroupDetailInfoRequest,
+    GetGroupInfoRequest,
     GetGroupListRequest,
+    GetGroupMemberInfoRequest,
     GetGroupMemberListRequest,
+    GetQunAlbumListRequest,
     NapCatActionResult,
     NapCatActionStatus,
     SendGroupAIRecordRequest,
@@ -31,6 +35,7 @@ from nanobot_channel_anon.mcp.models import (
     SetGroupLeaveRequest,
     SetGroupWholeBanRequest,
     SetMsgEmojiLikeRequest,
+    UploadImageToQunAlbumRequest,
 )
 
 
@@ -203,6 +208,26 @@ class NapCatClient:
             {"user_id": int(request.user_id), "times": request.times},
         )
 
+    async def get_group_info(
+        self,
+        request: GetGroupInfoRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_group_info with a validated request model."""
+        return await self.call(
+            "get_group_info",
+            {"group_id": int(request.group_id)},
+        )
+
+    async def get_group_detail_info(
+        self,
+        request: GetGroupDetailInfoRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_group_detail_info with a validated request model."""
+        return await self.call(
+            "get_group_detail_info",
+            {"group_id": int(request.group_id)},
+        )
+
     async def get_group_member_list(
         self,
         request: GetGroupMemberListRequest,
@@ -211,6 +236,48 @@ class NapCatClient:
         return await self.call(
             "get_group_member_list",
             {"group_id": int(request.group_id), "no_cache": request.no_cache},
+        )
+
+    async def get_group_member_info(
+        self,
+        request: GetGroupMemberInfoRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_group_member_info with a validated request model."""
+        return await self.call(
+            "get_group_member_info",
+            {
+                "group_id": int(request.group_id),
+                "user_id": int(request.user_id),
+                "no_cache": request.no_cache,
+            },
+        )
+
+    async def get_qun_album_list(
+        self,
+        request: GetQunAlbumListRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_qun_album_list with a validated request model."""
+        return await self.call(
+            "get_qun_album_list",
+            {
+                "group_id": request.group_id,
+                "attach_info": request.attach_info,
+            },
+        )
+
+    async def upload_image_to_qun_album(
+        self,
+        request: UploadImageToQunAlbumRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat upload_image_to_qun_album with a validated request model."""
+        return await self.call(
+            "upload_image_to_qun_album",
+            {
+                "group_id": request.group_id,
+                "album_id": request.album_id,
+                "album_name": request.album_name,
+                "file": request.file,
+            },
         )
 
     async def set_group_ban(

@@ -246,6 +246,118 @@ class GetAICharactersRequest(ToolRequestModel):
         return normalized
 
 
+class GetGroupInfoRequest(ToolRequestModel):
+    """Request payload for NapCat /get_group_info."""
+
+    group_id: str
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+
+class GetGroupDetailInfoRequest(ToolRequestModel):
+    """Request payload for NapCat /get_group_detail_info."""
+
+    group_id: str
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+
+class GetGroupMemberInfoRequest(ToolRequestModel):
+    """Request payload for NapCat /get_group_member_info."""
+
+    group_id: str
+    user_id: str
+    no_cache: bool
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def validate_user_id(cls, value: Any) -> str:
+        """Normalize a target QQ user ID."""
+        return _normalize_scalar_id(value, field_name="user_id")
+
+    @field_validator("no_cache", mode="before")
+    @classmethod
+    def validate_no_cache(cls, value: Any) -> bool:
+        """Require a real boolean no_cache flag."""
+        if not isinstance(value, bool):
+            raise ToolInputError("no_cache must be a boolean")
+        return value
+
+
+class GetQunAlbumListRequest(ToolRequestModel):
+    """Request payload for NapCat /get_qun_album_list."""
+
+    group_id: str
+    attach_info: str = ""
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("attach_info", mode="before")
+    @classmethod
+    def validate_attach_info(cls, value: Any) -> str:
+        """Normalize an optional album pagination token."""
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            raise ToolInputError("attach_info must be a string")
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, str):
+            return value.strip()
+        raise ToolInputError("attach_info must be a string")
+
+
+class UploadImageToQunAlbumRequest(ToolRequestModel):
+    """Request payload for NapCat /upload_image_to_qun_album."""
+
+    group_id: str
+    album_id: str
+    album_name: str
+    file: str
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("album_id", mode="before")
+    @classmethod
+    def validate_album_id(cls, value: Any) -> str:
+        """Normalize a target album ID."""
+        return _normalize_nonempty_string(value, field_name="album_id")
+
+    @field_validator("album_name", mode="before")
+    @classmethod
+    def validate_album_name(cls, value: Any) -> str:
+        """Normalize a target album name."""
+        return _normalize_nonempty_string(value, field_name="album_name")
+
+    @field_validator("file", mode="before")
+    @classmethod
+    def validate_file(cls, value: Any) -> str:
+        """Normalize an image path, URL, or base64 payload string."""
+        return _normalize_nonempty_string(value, field_name="file")
+
+
 class SetGroupAddRequestRequest(ToolRequestModel):
     """Request payload for NapCat /set_group_add_request."""
 
