@@ -5,7 +5,14 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from nanobot_channel_anon.utils import normalize_onebot_id
 
@@ -358,6 +365,155 @@ class UploadImageToQunAlbumRequest(ToolRequestModel):
         return _normalize_nonempty_string(value, field_name="file")
 
 
+class GetFriendMsgHistoryRequest(ToolRequestModel):
+    """Request payload for NapCat /get_friend_msg_history."""
+
+    user_id: str
+    message_seq: str | None = None
+    count: int = 20
+    reverse_order: bool = False
+    disable_get_url: bool = False
+    parse_mult_msg: bool = True
+    quick_reply: bool = False
+
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def validate_user_id(cls, value: Any) -> str:
+        """Normalize a target QQ user ID."""
+        return _normalize_scalar_id(value, field_name="user_id")
+
+    @field_validator("message_seq", mode="before")
+    @classmethod
+    def validate_message_seq(cls, value: Any) -> str | None:
+        """Normalize an optional message sequence string."""
+        return _normalize_optional_digit_string(value, field_name="message_seq")
+
+    @field_validator("count", mode="before")
+    @classmethod
+    def validate_count(cls, value: Any) -> int:
+        """Normalize a positive history count integer."""
+        return _normalize_positive_int(value, field_name="count")
+
+    @field_validator(
+        "reverse_order",
+        "disable_get_url",
+        "parse_mult_msg",
+        "quick_reply",
+        mode="before",
+    )
+    @classmethod
+    def validate_bool_flags(cls, value: Any, info: Any) -> bool:
+        """Require real booleans for history request flags."""
+        if not isinstance(value, bool):
+            raise ToolInputError(f"{info.field_name} must be a boolean")
+        return value
+
+
+class GetGroupMsgHistoryRequest(ToolRequestModel):
+    """Request payload for NapCat /get_group_msg_history."""
+
+    group_id: str
+    message_seq: str | None = None
+    count: int = 20
+    reverse_order: bool = False
+    disable_get_url: bool = False
+    parse_mult_msg: bool = True
+    quick_reply: bool = False
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str:
+        """Normalize a target group ID."""
+        return _normalize_scalar_id(value, field_name="group_id")
+
+    @field_validator("message_seq", mode="before")
+    @classmethod
+    def validate_message_seq(cls, value: Any) -> str | None:
+        """Normalize an optional message sequence string."""
+        return _normalize_optional_digit_string(value, field_name="message_seq")
+
+    @field_validator("count", mode="before")
+    @classmethod
+    def validate_count(cls, value: Any) -> int:
+        """Normalize a positive history count integer."""
+        return _normalize_positive_int(value, field_name="count")
+
+    @field_validator(
+        "reverse_order",
+        "disable_get_url",
+        "parse_mult_msg",
+        "quick_reply",
+        mode="before",
+    )
+    @classmethod
+    def validate_bool_flags(cls, value: Any, info: Any) -> bool:
+        """Require real booleans for history request flags."""
+        if not isinstance(value, bool):
+            raise ToolInputError(f"{info.field_name} must be a boolean")
+        return value
+
+
+class CreateFlashTaskRequest(ToolRequestModel):
+    """Request payload for NapCat /create_flash_task."""
+
+    files: list[str]
+    name: str | None = None
+    thumb_path: str | None = None
+
+    @field_validator("files", mode="before")
+    @classmethod
+    def validate_files(cls, value: Any) -> list[str]:
+        """Normalize one or more flash transfer file paths."""
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            return [_normalize_nonempty_string(value, field_name="files")]
+        if isinstance(value, list):
+            if not value:
+                raise ToolInputError("files must contain at least one path")
+            return [
+                _normalize_nonempty_string(item, field_name="files") for item in value
+            ]
+        raise ToolInputError("files must be a string or a list of strings")
+
+    @field_validator("name", "thumb_path", mode="before")
+    @classmethod
+    def validate_optional_strings(cls, value: Any, info: Any) -> str | None:
+        """Normalize optional flash task strings."""
+        return _normalize_optional_string(value, field_name=info.field_name)
+
+
+class SendFlashMsgRequest(ToolRequestModel):
+    """Request payload for NapCat /send_flash_msg."""
+
+    fileset_id: str
+    user_id: str | None = None
+    group_id: str | None = None
+
+    @field_validator("fileset_id", mode="before")
+    @classmethod
+    def validate_fileset_id(cls, value: Any) -> str:
+        """Normalize a flash transfer fileset ID."""
+        return _normalize_nonempty_string(value, field_name="fileset_id")
+
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def validate_user_id(cls, value: Any) -> str | None:
+        """Normalize an optional target QQ user ID."""
+        return _normalize_optional_scalar_id(value, field_name="user_id")
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def validate_group_id(cls, value: Any) -> str | None:
+        """Normalize an optional target group ID."""
+        return _normalize_optional_scalar_id(value, field_name="group_id")
+
+    @model_validator(mode="after")
+    def validate_target(self) -> SendFlashMsgRequest:
+        """Require at least one delivery target for flash transfer messages."""
+        if self.user_id is None and self.group_id is None:
+            raise ToolInputError("one of user_id or group_id is required")
+        return self
+
+
 class SetGroupAddRequestRequest(ToolRequestModel):
     """Request payload for NapCat /set_group_add_request."""
 
@@ -662,6 +818,47 @@ def _normalize_scalar_id(value: Any, *, field_name: str) -> str:
     return normalized
 
 
+def _normalize_optional_scalar_id(value: Any, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _normalize_scalar_id(value, field_name=field_name)
+
+
+def _normalize_positive_int(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise ToolInputError(f"{field_name} must be a positive integer")
+    if isinstance(value, int):
+        normalized = value
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or not stripped.isdigit():
+            raise ToolInputError(f"{field_name} must be a positive integer")
+        normalized = int(stripped)
+    else:
+        raise ToolInputError(f"{field_name} must be a positive integer")
+
+    if normalized <= 0:
+        raise ToolInputError(f"{field_name} must be a positive integer")
+    return normalized
+
+
+def _normalize_optional_digit_string(value: Any, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ToolInputError(f"{field_name} must be a digits string")
+    if isinstance(value, int):
+        normalized = str(value)
+    elif isinstance(value, str):
+        normalized = value.strip()
+    else:
+        raise ToolInputError(f"{field_name} must be a digits string")
+
+    if not normalized or not normalized.isdigit():
+        raise ToolInputError(f"{field_name} must be a digits string")
+    return normalized
+
+
 def _normalize_nonempty_string(value: Any, *, field_name: str) -> str:
     if isinstance(value, bool) or value is None:
         raise ToolInputError(f"{field_name} must be a non-empty string")
@@ -675,3 +872,9 @@ def _normalize_nonempty_string(value: Any, *, field_name: str) -> str:
     if not normalized:
         raise ToolInputError(f"{field_name} must be a non-empty string")
     return normalized
+
+
+def _normalize_optional_string(value: Any, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _normalize_nonempty_string(value, field_name=field_name)

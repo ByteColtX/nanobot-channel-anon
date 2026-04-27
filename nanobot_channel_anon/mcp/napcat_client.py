@@ -11,19 +11,23 @@ import aiohttp
 from loguru import logger
 
 from nanobot_channel_anon.mcp.models import (
+    CreateFlashTaskRequest,
     DeleteFriendRequest,
     DeleteMsgRequest,
     GetAICharactersRequest,
     GetAIRecordRequest,
     GetFriendListRequest,
+    GetFriendMsgHistoryRequest,
     GetGroupDetailInfoRequest,
     GetGroupInfoRequest,
     GetGroupListRequest,
     GetGroupMemberInfoRequest,
     GetGroupMemberListRequest,
+    GetGroupMsgHistoryRequest,
     GetQunAlbumListRequest,
     NapCatActionResult,
     NapCatActionStatus,
+    SendFlashMsgRequest,
     SendGroupAIRecordRequest,
     SendLikeRequest,
     SendPokeRequest,
@@ -207,6 +211,66 @@ class NapCatClient:
             "send_like",
             {"user_id": int(request.user_id), "times": request.times},
         )
+
+    async def get_friend_msg_history(
+        self,
+        request: GetFriendMsgHistoryRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_friend_msg_history with a validated request model."""
+        params: dict[str, Any] = {
+            "user_id": request.user_id,
+            "count": request.count,
+            "reverse_order": request.reverse_order,
+            "disable_get_url": request.disable_get_url,
+            "parse_mult_msg": request.parse_mult_msg,
+            "quick_reply": request.quick_reply,
+            "reverseOrder": request.reverse_order,
+        }
+        if request.message_seq is not None:
+            params["message_seq"] = request.message_seq
+        return await self.call("get_friend_msg_history", params)
+
+    async def get_group_msg_history(
+        self,
+        request: GetGroupMsgHistoryRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat get_group_msg_history with a validated request model."""
+        params: dict[str, Any] = {
+            "group_id": request.group_id,
+            "count": request.count,
+            "reverse_order": request.reverse_order,
+            "disable_get_url": request.disable_get_url,
+            "parse_mult_msg": request.parse_mult_msg,
+            "quick_reply": request.quick_reply,
+            "reverseOrder": request.reverse_order,
+        }
+        if request.message_seq is not None:
+            params["message_seq"] = request.message_seq
+        return await self.call("get_group_msg_history", params)
+
+    async def create_flash_task(
+        self,
+        request: CreateFlashTaskRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat create_flash_task with a validated request model."""
+        params: dict[str, Any] = {"files": request.files}
+        if request.name is not None:
+            params["name"] = request.name
+        if request.thumb_path is not None:
+            params["thumb_path"] = request.thumb_path
+        return await self.call("create_flash_task", params)
+
+    async def send_flash_msg(
+        self,
+        request: SendFlashMsgRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat send_flash_msg with a validated request model."""
+        params: dict[str, Any] = {"fileset_id": request.fileset_id}
+        if request.user_id is not None:
+            params["user_id"] = request.user_id
+        if request.group_id is not None:
+            params["group_id"] = request.group_id
+        return await self.call("send_flash_msg", params)
 
     async def get_group_info(
         self,

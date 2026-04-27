@@ -9,6 +9,9 @@ from mcp.server import FastMCP
 
 from nanobot_channel_anon.mcp.napcat_client import NapCatClient
 from nanobot_channel_anon.mcp.settings import load_settings
+from nanobot_channel_anon.mcp.tools.create_flash_task import (
+    register_create_flash_task_tool,
+)
 from nanobot_channel_anon.mcp.tools.delete_friend import register_delete_friend_tool
 from nanobot_channel_anon.mcp.tools.delete_msg import register_delete_msg_tool
 from nanobot_channel_anon.mcp.tools.get_ai_characters import (
@@ -16,6 +19,9 @@ from nanobot_channel_anon.mcp.tools.get_ai_characters import (
 )
 from nanobot_channel_anon.mcp.tools.get_ai_record import register_get_ai_record_tool
 from nanobot_channel_anon.mcp.tools.get_friend_list import register_get_friend_list_tool
+from nanobot_channel_anon.mcp.tools.get_friend_msg_history import (
+    register_get_friend_msg_history_tool,
+)
 from nanobot_channel_anon.mcp.tools.get_group_detail_info import (
     register_get_group_detail_info_tool,
 )
@@ -27,9 +33,13 @@ from nanobot_channel_anon.mcp.tools.get_group_member_info import (
 from nanobot_channel_anon.mcp.tools.get_group_member_list import (
     register_get_group_member_list_tool,
 )
+from nanobot_channel_anon.mcp.tools.get_group_msg_history import (
+    register_get_group_msg_history_tool,
+)
 from nanobot_channel_anon.mcp.tools.get_qun_album_list import (
     register_get_qun_album_list_tool,
 )
+from nanobot_channel_anon.mcp.tools.send_flash_msg import register_send_flash_msg_tool
 from nanobot_channel_anon.mcp.tools.send_group_ai_record import (
     register_send_group_ai_record_tool,
 )
@@ -83,14 +93,18 @@ def create_server() -> FastMCP[object]:
     register_delete_friend_tool(mcp, client)
     register_send_poke_tool(mcp, client)
     register_send_group_ai_record_tool(mcp, client)
+    register_send_flash_msg_tool(mcp, client)
     register_send_like_tool(mcp, client)
+    register_create_flash_task_tool(mcp, client)
     register_get_ai_record_tool(mcp, client)
     register_get_ai_characters_tool(mcp, client)
     register_get_group_info_tool(mcp, client)
     register_get_group_detail_info_tool(mcp, client)
     register_get_group_member_info_tool(mcp, client)
     register_get_group_member_list_tool(mcp, client)
+    register_get_group_msg_history_tool(mcp, client)
     register_get_friend_list_tool(mcp, client)
+    register_get_friend_msg_history_tool(mcp, client)
     register_get_group_list_tool(mcp, client)
     register_get_qun_album_list_tool(mcp, client)
     register_upload_image_to_qun_album_tool(mcp, client)
