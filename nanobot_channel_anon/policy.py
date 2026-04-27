@@ -161,9 +161,10 @@ class PolicyEngine:
         return TriggerDecision(triggered=True, reason=TriggerReason.POKE)
 
     def _matches_keyword(self, content: str) -> bool:
+        folded_content = content.casefold()
         for keyword in self.config.trigger_on_keywords:
-            normalized = keyword.strip()
-            if normalized and normalized in content:
+            normalized = keyword.strip().casefold()
+            if normalized and normalized in folded_content:
                 return True
         return False
 

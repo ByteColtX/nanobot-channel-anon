@@ -185,7 +185,7 @@ def test_decide_trigger_group_message_prefers_keyword_then_reply_then_at() -> No
     )
 
     keyword = policy.decide_trigger(
-        _message(content="hello bot", mentioned_self=True, reply_to_self=True)
+        _message(content="hello BOT", mentioned_self=True, reply_to_self=True)
     )
     reply = policy.decide_trigger(
         _message(content="hello", reply_to_self=True, mentioned_self=True)
