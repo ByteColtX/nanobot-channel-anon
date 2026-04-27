@@ -118,6 +118,72 @@ def test_channel_shell_drops_upstream_error_text() -> None:
     asyncio.run(case())
 
 
+def test_channel_shell_drops_upstream_empty_final_response_text() -> None:
+    """空最终答复兜底文案应在 channel 外壳层被拦截."""
+
+    async def case() -> None:
+        kernel = RecordingKernel()
+
+        def kernel_factory(config: AnonConfig, bus: MessageBus) -> RecordingKernel:
+            del config, bus
+            return kernel
+
+        channel = AnonChannel(
+            {"ws_url": "ws://127.0.0.1:3001"},
+            MessageBus(),
+            kernel_factory=kernel_factory,
+        )
+
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content=(
+                    "I completed the tool steps but couldn't produce a final answer. "
+                    "Please try again or narrow the task."
+                ),
+            )
+        )
+        await channel.send_delta(
+            "private:1",
+            "I completed the tool steps but couldn't produce a final answer. "
+            "Please try again or narrow the task.",
+        )
+
+        assert kernel.sent == []
+        assert kernel.deltas == []
+
+    asyncio.run(case())
+
+
+def test_channel_shell_drops_upstream_subagent_empty_final_response_text() -> None:
+    """子代理空最终答复文案应在 channel 外壳层被拦截."""
+
+    async def case() -> None:
+        kernel = RecordingKernel()
+
+        def kernel_factory(config: AnonConfig, bus: MessageBus) -> RecordingKernel:
+            del config, bus
+            return kernel
+
+        channel = AnonChannel(
+            {"ws_url": "ws://127.0.0.1:3001"},
+            MessageBus(),
+            kernel_factory=kernel_factory,
+        )
+
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content="Task completed but no final response was generated.",
+            )
+        )
+
+        assert kernel.sent == []
+
+    asyncio.run(case())
+
 
 def test_channel_shell_allows_normal_text() -> None:
     """普通文本不应被最小错误拦截规则误伤."""
@@ -142,8 +208,18 @@ def test_channel_shell_allows_normal_text() -> None:
                 content="Restarting...",
             )
         )
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content="I completed the tool steps and here is the final answer.",
+            )
+        )
 
-        assert [msg.content for msg in kernel.sent] == ["Restarting..."]
+        assert [msg.content for msg in kernel.sent] == [
+            "Restarting...",
+            "I completed the tool steps and here is the final answer.",
+        ]
 
     asyncio.run(case())
 

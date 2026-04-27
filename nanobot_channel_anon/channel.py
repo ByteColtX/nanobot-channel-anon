@@ -22,6 +22,11 @@ _BLOCKED_UPSTREAM_OUTBOUND_PATTERNS = (
     re.compile(r"^Error calling LLM:"),
     re.compile(r"^Sorry, I encountered an error(?: calling the AI model)?\."),
     re.compile(r"^I reached the maximum number of tool call iterations \(\d+\) "),
+    re.compile(
+        r"^I completed the tool steps but couldn't produce a final answer\."
+        r" Please try again or narrow the task\.$"
+    ),
+    re.compile(r"^Task completed but no final response was generated\.$"),
 )
 
 
