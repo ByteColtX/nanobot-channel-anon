@@ -539,7 +539,6 @@ class OneBotTransport:
             logger.warning("Anon get_group_list returned invalid data during mute sync")
             return
 
-        allowed_groups = self.config.allowed_conversation_keys
         group_ids: list[str] = []
         for item in groups:
             if not isinstance(item, dict):
@@ -547,7 +546,7 @@ class OneBotTransport:
             group_id = normalize_onebot_id(item.get("group_id"))
             if group_id is None:
                 continue
-            if not self.config.allow_all and f"group:{group_id}" not in allowed_groups:
+            if not self.config.is_conversation_allowed("group", f"group:{group_id}"):
                 continue
             group_ids.append(group_id)
 

@@ -17,8 +17,8 @@ class AnonConfig(Base):
     allow_from: list[str] = Field(
         default_factory=list,
         description=(
-            "允许访问的会话列表。仅支持 group:<id>/private:<id> 形式的标准会话键; "
-            "[*] 表示允许全部。"
+            "允许访问的会话列表。支持 *、group:<id>、private:<id>、group:*、"
+            "private:* 形式; 其中 * 表示允许全部。"
         ),
     )
     ws_url: str = Field(default="", description="NapCat OneBot WebSocket 地址。")
@@ -110,12 +110,32 @@ class AnonConfig(Base):
 
     @property
     def allowed_conversation_keys(self) -> frozenset[str]:
-        """返回允许的标准会话键集合."""
+        """返回允许的显式会话键集合."""
         return frozenset(
             entry
             for entry in self.allow_from
-            if entry.startswith(("group:", "private:"))
+            if entry.startswith(("group:", "private:")) and not entry.endswith(":*")
         )
+
+    @property
+    def allow_all_groups(self) -> bool:
+        """返回是否允许全部群会话."""
+        return self.allow_all or "group:*" in self.allow_from
+
+    @property
+    def allow_all_privates(self) -> bool:
+        """返回是否允许全部私聊会话."""
+        return self.allow_all or "private:*" in self.allow_from
+
+    def is_conversation_allowed(self, kind: str, key: str) -> bool:
+        """判断指定会话是否在允许范围内."""
+        if key in self.allowed_conversation_keys:
+            return True
+        if kind == "group":
+            return self.allow_all_groups
+        if kind == "private":
+            return self.allow_all_privates
+        return False
 
     @classmethod
     def _normalize_allow_entry(cls, value: Any) -> str | None:
@@ -128,12 +148,14 @@ class AnonConfig(Base):
         prefix, separator, raw_id = item.partition(":")
         if not separator:
             raise ValueError(
-                "allow_from entries must use group:<id> or private:<id>"
+                "allow_from entries must use *, group:<id>, private:<id>, "
+                "group:*, or private:*"
             )
         normalized_id = normalize_onebot_id(raw_id)
         if prefix not in {"group", "private"} or normalized_id is None:
             raise ValueError(
-                "allow_from entries must use group:<id> or private:<id>"
+                "allow_from entries must use *, group:<id>, private:<id>, "
+                "group:*, or private:*"
             )
         return f"{prefix}:{normalized_id}"
 

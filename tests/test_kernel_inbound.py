@@ -544,6 +544,89 @@ def test_transport_startup_sync_scans_all_groups_when_allow_all_enabled() -> Non
     asyncio.run(case())
 
 
+def test_transport_startup_sync_scans_all_groups_when_group_scoped_wildcard_enabled(
+) -> None:
+    """allow_from=["group:*"] 时也应扫描启动期可见的全部群禁言状态."""
+
+    async def case() -> None:
+        connection = FakeConnection()
+        records: list[str] = []
+        sink_id = logger.add(records.append, format="{message}")
+
+        async def connect() -> FakeConnection:
+            return connection
+
+        transport = OneBotTransport(
+            config=_config(allow_from=["group:*"]),
+            connect=connect,
+        )
+        task = asyncio.create_task(transport.start())
+        muted_until = int(time.time()) + 120
+        await _complete_startup_sync(
+            connection,
+            group_list=[{"group_id": 456}, {"group_id": 999}],
+            shut_lists={
+                "456": [{"uin": 42, "shutUpTime": muted_until}],
+                "999": [{"uin": 42, "shutUpTime": muted_until}],
+            },
+        )
+
+        await _wait_for_condition(lambda: transport.state.self_id == "42")
+        await _wait_for_condition(lambda: transport.state.is_group_muted("456"))
+        await _wait_for_condition(lambda: transport.state.is_group_muted("999"))
+
+        await transport.stop()
+        await asyncio.wait_for(task, timeout=1.0)
+        logger.remove(sink_id)
+
+        log_output = "\n".join(records)
+        assert "Anon mute sync discovered groups: 2" in log_output
+        assert "Anon mute sync marked group as muted: group_id=456" in log_output
+        assert "Anon mute sync marked group as muted: group_id=999" in log_output
+        assert "Anon mute sync completed: scanned_groups=2 muted_groups=2" in log_output
+
+    asyncio.run(case())
+
+
+def test_transport_startup_sync_skips_group_scan_for_private_scoped_wildcard() -> None:
+    """allow_from=["private:*"] 时不应触发任何群禁言回查."""
+
+    async def case() -> None:
+        connection = FakeConnection()
+        records: list[str] = []
+        sink_id = logger.add(records.append, format="{message}")
+
+        async def connect() -> FakeConnection:
+            return connection
+
+        transport = OneBotTransport(
+            config=_config(allow_from=["private:*"]),
+            connect=connect,
+        )
+        task = asyncio.create_task(transport.start())
+        await _complete_startup_sync(
+            connection,
+            group_list=[{"group_id": 456}, {"group_id": 999}],
+        )
+
+        await _wait_for_condition(lambda: transport.state.self_id == "42")
+        await _wait_for_condition(lambda: len(connection.sent_json) == 2)
+
+        await transport.stop()
+        await asyncio.wait_for(task, timeout=1.0)
+        logger.remove(sink_id)
+
+        assert [request["action"] for request in connection.sent_json] == [
+            "get_login_info",
+            "get_group_list",
+        ]
+        log_output = "\n".join(records)
+        assert "Anon mute sync discovered groups: 0" in log_output
+        assert "Anon mute sync completed: scanned_groups=0 muted_groups=0" in log_output
+
+    asyncio.run(case())
+
+
 def test_transport_group_reply_backfill_does_not_deadlock_reader_loop() -> None:
     """读循环中的 reply 回查应通过独立分发协程完成, 不阻塞 get_msg 响应."""
 
@@ -789,6 +872,50 @@ def test_kernel_enforces_allowlist_before_publish() -> None:
         await kernel.handle_inbound(_group_message())
 
         assert bus.inbound_size == 0
+
+    asyncio.run(case())
+
+
+def test_kernel_allows_group_scoped_wildcard_before_publish() -> None:
+    """group:* 命中时群消息应进入后续链路."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        kernel = Kernel(
+            config=_config(allow_from=["group:*"], group_trigger_prob=1.0),
+            bus=bus,
+            transport=RecordingTransport(),
+        )
+
+        await kernel.handle_inbound(_group_message())
+
+        assert bus.inbound_size == 1
+
+    asyncio.run(case())
+
+
+def test_kernel_allows_private_scoped_wildcard_before_publish() -> None:
+    """private:* 命中时私聊消息应进入后续链路."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        kernel = Kernel(
+            config=_config(allow_from=["private:*"]),
+            bus=bus,
+            transport=RecordingTransport(),
+        )
+
+        await kernel.handle_inbound(
+            NormalizedMessage(
+                message_id="pm-1",
+                conversation=ConversationRef(kind="private", id="999"),
+                sender_id="999",
+                sender_name="Alice",
+                content="hello",
+            )
+        )
+
+        assert bus.inbound_size == 1
 
     asyncio.run(case())
 

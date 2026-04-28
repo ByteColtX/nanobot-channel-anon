@@ -55,13 +55,50 @@ def test_allow_from_normalizes_only_canonical_conversation_keys() -> None:
     assert config.super_admins == ["42", "7"]
 
 
+def test_allow_from_accepts_scoped_wildcards_without_treating_them_as_explicit_keys(
+) -> None:
+    """Scoped wildcard 应保留在 allow_from 中, 但不算作显式会话键."""
+    config = AnonConfig.model_validate(
+        {
+            "allow_from": [
+                " group:* ",
+                "private:*",
+                "group:456",
+                "private:789",
+                "group:*",
+            ]
+        }
+    )
+
+    assert config.allow_from == ["group:*", "private:*", "group:456", "private:789"]
+    assert config.allowed_conversation_keys == frozenset({"group:456", "private:789"})
+    assert config.allow_all_groups is True
+    assert config.allow_all_privates is True
+
+
 def test_allow_from_rejects_bare_ids() -> None:
     """裸 ID 不再是合法 allow_from 配置."""
     with pytest.raises(
         ValidationError,
-        match="allow_from entries must use group:<id> or private:<id>",
+        match=(
+            r"allow_from entries must use \*, group:<id>, private:<id>, "
+            r"group:\*, or private:\*"
+        ),
     ):
         AnonConfig.model_validate({"allow_from": ["123"]})
+
+
+@pytest.mark.parametrize("entry", ["foo:*", "group:", "private:"])
+def test_allow_from_rejects_invalid_scoped_wildcards(entry: str) -> None:
+    """非法 scoped wildcard 写法应继续被拒绝."""
+    with pytest.raises(
+        ValidationError,
+        match=(
+            r"allow_from entries must use \*, group:<id>, private:<id>, "
+            r"group:\*, or private:\*"
+        ),
+    ):
+        AnonConfig.model_validate({"allow_from": [entry]})
 
 
 def test_context_and_media_limits_keep_legacy_defaults() -> None:

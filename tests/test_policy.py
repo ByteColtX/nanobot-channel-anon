@@ -70,6 +70,60 @@ def test_is_allowed_matches_canonical_private_conversation_key_entry() -> None:
     ) is False
 
 
+def test_is_allowed_matches_group_scoped_wildcard() -> None:
+    """group:* 应放行任意群消息, 但不放行私聊."""
+    policy = PolicyEngine(AnonConfig(allow_from=["group:*"]))
+
+    assert policy.is_allowed(
+        _message(sender_id="999", conversation=GROUP_CONVERSATION)
+    ) is True
+    assert policy.is_allowed(
+        _message(sender_id="999", conversation=PRIVATE_CONVERSATION)
+    ) is False
+
+
+def test_is_allowed_matches_private_scoped_wildcard() -> None:
+    """private:* 应放行任意私聊消息, 但不放行群消息."""
+    policy = PolicyEngine(AnonConfig(allow_from=["private:*"]))
+
+    assert policy.is_allowed(
+        _message(sender_id="999", conversation=PRIVATE_CONVERSATION)
+    ) is True
+    assert policy.is_allowed(
+        _message(sender_id="999", conversation=GROUP_CONVERSATION)
+    ) is False
+
+
+def test_is_allowed_allows_mixed_scoped_and_explicit_entries() -> None:
+    """Scoped wildcard 与显式会话键应能按预期共存."""
+    policy = PolicyEngine(AnonConfig(allow_from=["group:*", "private:123"]))
+
+    assert policy.is_allowed(
+        _message(sender_id="999", conversation=GROUP_CONVERSATION)
+    ) is True
+    assert policy.is_allowed(
+        _message(sender_id="999", conversation=PRIVATE_CONVERSATION)
+    ) is True
+    assert policy.is_allowed(
+        _message(
+            sender_id="999",
+            conversation=ConversationRef(kind="private", id="999"),
+        )
+    ) is False
+
+
+def test_is_allowed_honors_global_wildcard() -> None:
+    """全局 * 仍应保持原有的全量放行语义."""
+    policy = PolicyEngine(AnonConfig(allow_from=["*"]))
+
+    assert policy.is_allowed(
+        _message(sender_id="999", conversation=GROUP_CONVERSATION)
+    ) is True
+    assert policy.is_allowed(
+        _message(sender_id="999", conversation=PRIVATE_CONVERSATION)
+    ) is True
+
+
 def test_is_allowed_honors_super_admins_even_when_allowlist_rejects() -> None:
     """Super admins should bypass the normal allowlist."""
     policy = PolicyEngine(AnonConfig(allow_from=["group:456"], super_admins=["999"]))
