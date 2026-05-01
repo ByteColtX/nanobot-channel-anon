@@ -31,6 +31,7 @@ class PolicyEngine:
             "/stop",
             "/restart",
             "/status",
+            "/history",
             "/dream",
             "/dream-log",
             "/dream-restore",

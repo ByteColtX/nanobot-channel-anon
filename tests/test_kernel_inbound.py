@@ -1324,6 +1324,47 @@ def test_kernel_passthroughs_known_slash_command_for_super_admin_without_storing
     asyncio.run(case())
 
 
+def test_kernel_passthroughs_history_slash_command_for_super_admin_without_storing(
+) -> None:
+    """带参数的 history 菜单命令也应直通总线且不写入上下文."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        kernel = Kernel(
+            config=_config(
+                allow_from=["group:456"],
+                super_admins=["123"],
+                trigger_on_at=False,
+                trigger_on_reply=False,
+                group_trigger_prob=0.0,
+            ),
+            bus=bus,
+            transport=RecordingTransport(),
+        )
+
+        message = _group_message(content="/history 5")
+        await kernel.handle_inbound(message)
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert inbound.chat_id == "group:456"
+        assert inbound.content == "/history 5"
+        assert inbound.metadata["trigger_reason"] == "slash_command"
+        assert inbound.metadata["message"]["content"] == "/history 5"
+        assert inbound.metadata["ctx_message_ids"] == []
+        assert inbound.metadata["ctx_count"] == 0
+        assert "command" not in inbound.metadata
+        assert (
+            kernel.context_store.get_message(
+                message.conversation,
+                message.message_id,
+            )
+            is None
+        )
+
+    asyncio.run(case())
+
+
 def test_kernel_treats_known_slash_command_from_non_admin_as_normal_message() -> None:
     """非管理员发送已知菜单命令时应按普通消息触发并写入上下文."""
 

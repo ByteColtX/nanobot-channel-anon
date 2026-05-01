@@ -161,6 +161,15 @@ def test_classify_slash_command_normalizes_known_command_case() -> None:
     assert command == "/help"
 
 
+def test_classify_slash_command_recognizes_history_with_arguments() -> None:
+    """Known slash commands should still match when they carry arguments."""
+    policy = PolicyEngine(AnonConfig())
+
+    command = policy.classify_slash_command(_message(content="/history 5"))
+
+    assert command == "/history"
+
+
 def test_classify_slash_command_requires_exact_command_match() -> None:
     """Prefix-like commands should not match a shorter menu entry."""
     policy = PolicyEngine(AnonConfig())
