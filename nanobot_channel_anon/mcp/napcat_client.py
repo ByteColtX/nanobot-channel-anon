@@ -39,6 +39,7 @@ from nanobot_channel_anon.mcp.models import (
     SetGroupLeaveRequest,
     SetGroupWholeBanRequest,
     SetMsgEmojiLikeRequest,
+    SetQQAvatarRequest,
     UploadImageToQunAlbumRequest,
 )
 
@@ -343,6 +344,13 @@ class NapCatClient:
                 "file": request.file,
             },
         )
+
+    async def set_qq_avatar(
+        self,
+        request: SetQQAvatarRequest,
+    ) -> NapCatActionResult:
+        """Call NapCat set_qq_avatar with a validated request model."""
+        return await self.call("set_qq_avatar", {"file": request.file})
 
     async def set_group_ban(
         self,

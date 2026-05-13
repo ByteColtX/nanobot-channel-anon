@@ -24,6 +24,7 @@ from nanobot_channel_anon.mcp.models import (
     SetGroupLeaveRequest,
     SetGroupWholeBanRequest,
     SetMsgEmojiLikeRequest,
+    SetQQAvatarRequest,
 )
 from nanobot_channel_anon.mcp.napcat_client import NapCatAPIError, NapCatClient
 
@@ -964,6 +965,57 @@ def test_set_msg_emoji_like_raises_for_failure_payload() -> None:
                         set=False,
                     )
                 )
+        finally:
+            await server.close()
+
+    asyncio.run(case())
+
+
+def test_set_qq_avatar_request_includes_base64_file() -> None:
+    """QQ avatar updates should post the base64 file payload."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={"status": "ok", "retcode": 0, "data": {}}
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            response = await client.set_qq_avatar(
+                SetQQAvatarRequest(file="base64://abcd1234")
+            )
+        finally:
+            await server.close()
+
+        assert response.status.value == "ok"
+        assert server.requests == [
+            {
+                "action": "set_qq_avatar",
+                "body": {"file": "base64://abcd1234"},
+            }
+        ]
+
+    asyncio.run(case())
+
+
+def test_set_qq_avatar_raises_for_failure_payload() -> None:
+    """QQ avatar failures should surface the NapCat action name."""
+
+    async def case() -> None:
+        server = NapCatHTTPServer(
+            response_payload={
+                "status": "failed",
+                "retcode": 1400,
+                "data": None,
+                "message": "处理失败",
+                "wording": "处理失败",
+            }
+        )
+        await server.start()
+        client = NapCatClient(base_url=server.url, timeout_seconds=1.0)
+        try:
+            with pytest.raises(NapCatAPIError, match="set_qq_avatar"):
+                await client.set_qq_avatar(SetQQAvatarRequest(file="base64://abcd1234"))
         finally:
             await server.close()
 

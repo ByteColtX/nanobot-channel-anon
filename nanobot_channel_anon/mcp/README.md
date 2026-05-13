@@ -10,7 +10,7 @@
 
 ## 当前已实现的工具
 
-当前已实现 27 个 MCP tools。
+当前已实现 28 个 MCP tools。
 
 ### 消息与媒体相关
 
@@ -34,6 +34,7 @@
 - `set_friend_add_request`：处理好友请求
 - `delete_friend`：删除好友或加入黑名单
 - `send_like`：发送点赞
+- `set_qq_avatar`：设置当前登录账号的 QQ 头像
 
 ### 群聊与成员相关
 

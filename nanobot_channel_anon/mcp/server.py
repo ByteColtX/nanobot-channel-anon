@@ -61,6 +61,7 @@ from nanobot_channel_anon.mcp.tools.set_group_whole_ban import (
 from nanobot_channel_anon.mcp.tools.set_msg_emoji_like import (
     register_set_msg_emoji_like_tool,
 )
+from nanobot_channel_anon.mcp.tools.set_qq_avatar import register_set_qq_avatar_tool
 from nanobot_channel_anon.mcp.tools.upload_image_to_qun_album import (
     register_upload_image_to_qun_album_tool,
 )
@@ -116,6 +117,7 @@ def create_server() -> FastMCP[object]:
     register_set_group_leave_tool(mcp, client)
     register_set_group_whole_ban_tool(mcp, client)
     register_set_msg_emoji_like_tool(mcp, client)
+    register_set_qq_avatar_tool(mcp, client)
     return mcp
 
 

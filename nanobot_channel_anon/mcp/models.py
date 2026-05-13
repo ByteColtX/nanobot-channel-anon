@@ -365,6 +365,21 @@ class UploadImageToQunAlbumRequest(ToolRequestModel):
         return _normalize_nonempty_string(value, field_name="file")
 
 
+class SetQQAvatarRequest(ToolRequestModel):
+    """Request payload for NapCat /set_qq_avatar."""
+
+    file: str
+
+    @field_validator("file", mode="before")
+    @classmethod
+    def validate_file(cls, value: Any) -> str:
+        """Normalize a required base64 avatar image payload."""
+        normalized = _normalize_nonempty_string(value, field_name="file")
+        if not normalized.startswith("base64://"):
+            raise ToolInputError("file must start with base64://")
+        return normalized
+
+
 class GetFriendMsgHistoryRequest(ToolRequestModel):
     """Request payload for NapCat /get_friend_msg_history."""
 

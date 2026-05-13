@@ -20,6 +20,7 @@ from nanobot_channel_anon.mcp.models import (
     SetGroupLeaveRequest,
     SetGroupWholeBanRequest,
     SetMsgEmojiLikeRequest,
+    SetQQAvatarRequest,
     ToolInputError,
 )
 
@@ -532,6 +533,22 @@ def test_set_msg_emoji_like_request_rejects_non_boolean_set(value: object) -> No
         SetMsgEmojiLikeRequest.from_tool_input(
             {"message_id": "123456", "emoji_id": "666", "set": value}
         )
+
+
+def test_set_qq_avatar_request_accepts_base64_file() -> None:
+    """QQ avatar file input should require and preserve base64 payloads."""
+    request = SetQQAvatarRequest.from_tool_input({"file": " base64://abcd1234 "})
+    assert request.file == "base64://abcd1234"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "file:///tmp/a.png", "http://a/b.png", True, None],
+)
+def test_set_qq_avatar_request_rejects_non_base64_file(value: object) -> None:
+    """QQ avatar file must be a base64:// payload."""
+    with pytest.raises(ToolInputError):
+        SetQQAvatarRequest.from_tool_input({"file": value})
 
 
 @pytest.mark.parametrize(
