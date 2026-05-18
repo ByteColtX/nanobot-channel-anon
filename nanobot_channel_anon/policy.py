@@ -13,6 +13,57 @@ from nanobot_channel_anon.domain import (
     TriggerReason,
 )
 
+_FALLBACK_EXACT_SLASH_COMMANDS = frozenset(
+    {
+        "/new",
+        "/stop",
+        "/restart",
+        "/status",
+        "/model",
+        "/history",
+        "/goal",
+        "/dream",
+        "/dream-log",
+        "/dream-restore",
+        "/help",
+        "/pairing",
+    }
+)
+_FALLBACK_PREFIX_SLASH_COMMANDS = frozenset(
+    {
+        "/model",
+        "/history",
+        "/goal",
+        "/dream-log",
+        "/dream-restore",
+        "/pairing",
+    }
+)
+
+
+def _load_upstream_slash_commands() -> tuple[frozenset[str], frozenset[str]]:
+    """从上游命令路由表读取可透传的 slash 命令."""
+    try:
+        from nanobot.command.builtin import register_builtin_commands
+        from nanobot.command.router import CommandRouter
+
+        router = CommandRouter()
+        register_builtin_commands(router)
+        exact = frozenset({*router._priority, *router._exact})
+        prefix = frozenset(
+            item.rstrip()
+            for item, _handler in router._prefix
+            if item.endswith(" ")
+        )
+        return exact, prefix
+    except Exception:
+        return _FALLBACK_EXACT_SLASH_COMMANDS, _FALLBACK_PREFIX_SLASH_COMMANDS
+
+
+_UPSTREAM_EXACT_SLASH_COMMANDS, _UPSTREAM_PREFIX_SLASH_COMMANDS = (
+    _load_upstream_slash_commands()
+)
+
 
 @dataclass(slots=True)
 class PolicyContext:
@@ -25,19 +76,6 @@ class PolicyContext:
 class PolicyEngine:
     """统一处理允许访问、命令识别与触发决策."""
 
-    _KNOWN_SLASH_COMMANDS = frozenset(
-        {
-            "/new",
-            "/stop",
-            "/restart",
-            "/status",
-            "/history",
-            "/dream",
-            "/dream-log",
-            "/dream-restore",
-            "/help",
-        }
-    )
     def __init__(self, config: AnonConfig) -> None:
         """初始化策略引擎."""
         self.config = config
@@ -61,13 +99,21 @@ class PolicyEngine:
         return message.sender_id in self.config.super_admins
 
     def classify_slash_command(self, message: NormalizedMessage) -> str | None:
-        """按固定菜单识别允许透传的斜杠命令."""
+        """按上游 exact/prefix 命令路由识别允许透传的斜杠命令."""
         content = message.content.strip()
         if not content.startswith("/"):
             return None
 
-        command = content.split(maxsplit=1)[0].lower()
-        if command in self._KNOWN_SLASH_COMMANDS:
+        normalized = content.lower()
+        if normalized in _UPSTREAM_EXACT_SLASH_COMMANDS:
+            return normalized
+
+        command = normalized.split(maxsplit=1)[0]
+        if (
+            command in _UPSTREAM_PREFIX_SLASH_COMMANDS
+            and len(normalized) > len(command)
+            and normalized[len(command)].isspace()
+        ):
             return command
         return None
 

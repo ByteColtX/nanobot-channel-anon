@@ -308,6 +308,65 @@ def test_channel_shell_allows_progress_when_explicitly_enabled() -> None:
     asyncio.run(case())
 
 
+def test_channel_shell_drops_retry_wait_control_messages() -> None:
+    """上游 retry-wait 控制消息不应发到 QQ."""
+
+    async def case() -> None:
+        kernel = RecordingKernel()
+
+        def kernel_factory(config: AnonConfig, bus: MessageBus) -> RecordingKernel:
+            del config, bus
+            return kernel
+
+        channel = AnonChannel(
+            {
+                "ws_url": "ws://127.0.0.1:3001",
+                "send_progress": True,
+            },
+            MessageBus(),
+            kernel_factory=kernel_factory,
+        )
+
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content="Retrying in 1s...",
+                metadata={"_retry_wait": True},
+            )
+        )
+
+        assert kernel.sent == []
+
+    asyncio.run(case())
+
+
+def test_channel_shell_reasoning_flag_is_independent_from_progress() -> None:
+    """Reasoning 开关应独立于 sendProgress 判断."""
+    kernel = RecordingKernel()
+
+    def kernel_factory(config: AnonConfig, bus: MessageBus) -> RecordingKernel:
+        del config, bus
+        return kernel
+
+    channel = AnonChannel(
+        {
+            "ws_url": "ws://127.0.0.1:3001",
+            "send_progress": False,
+            "show_reasoning": True,
+        },
+        MessageBus(),
+        kernel_factory=kernel_factory,
+    )
+
+    assert (
+        channel._should_drop_trace_outbound(
+            {"_progress": True, "_reasoning_delta": True}
+        )
+        is False
+    )
+
+
 def test_channel_shell_allows_error_text_with_media() -> None:
     """带媒体的消息不应仅因文本前缀命中而被丢弃."""
 

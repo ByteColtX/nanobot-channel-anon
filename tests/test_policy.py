@@ -156,9 +156,9 @@ def test_classify_slash_command_normalizes_known_command_case() -> None:
     """Known slash commands should normalize case before menu matching."""
     policy = PolicyEngine(AnonConfig())
 
-    command = policy.classify_slash_command(_message(content="/HeLp status"))
+    command = policy.classify_slash_command(_message(content="/MoDeL default"))
 
-    assert command == "/help"
+    assert command == "/model"
 
 
 def test_classify_slash_command_recognizes_history_with_arguments() -> None:
@@ -170,6 +170,18 @@ def test_classify_slash_command_recognizes_history_with_arguments() -> None:
     assert command == "/history"
 
 
+def test_classify_slash_command_matches_upstream_v2_commands() -> None:
+    """Slash passthrough should include upstream v0.2 command entries."""
+    policy = PolicyEngine(AnonConfig())
+
+    assert policy.classify_slash_command(_message(content="/model default")) == "/model"
+    assert policy.classify_slash_command(_message(content="/goal ship it")) == "/goal"
+    assert (
+        policy.classify_slash_command(_message(content="/pairing approve abc123"))
+        == "/pairing"
+    )
+
+
 def test_classify_slash_command_requires_exact_command_match() -> None:
     """Prefix-like commands should not match a shorter menu entry."""
     policy = PolicyEngine(AnonConfig())
@@ -177,6 +189,14 @@ def test_classify_slash_command_requires_exact_command_match() -> None:
     command = policy.classify_slash_command(_message(content="/helpful status"))
 
     assert command is None
+
+
+def test_classify_slash_command_rejects_args_for_exact_only_commands() -> None:
+    """Exact-only upstream commands should not match when arguments are present."""
+    policy = PolicyEngine(AnonConfig())
+
+    assert policy.classify_slash_command(_message(content="/help status")) is None
+    assert policy.classify_slash_command(_message(content="/status verbose")) is None
 
 
 def test_classify_slash_command_returns_none_for_unknown_slash() -> None:
@@ -206,13 +226,13 @@ def test_should_passthrough_slash_command_requires_known_command_and_super_admin
 
     assert (
         policy.should_passthrough_slash_command(
-            _message(sender_id="999", content="/help status")
+            _message(sender_id="999", content="/model default")
         )
         is True
     )
     assert (
         policy.should_passthrough_slash_command(
-            _message(sender_id="123", content="/help status")
+            _message(sender_id="123", content="/model default")
         )
         is False
     )

@@ -28,6 +28,14 @@ _BLOCKED_UPSTREAM_OUTBOUND_PATTERNS = (
     ),
     re.compile(r"^Task completed but no final response was generated\.$"),
 )
+_BLOCKED_UPSTREAM_CONTROL_FLAGS = (
+    "_goal_state_sync",
+    "_retry_wait",
+    "_runtime_model_updated",
+    "_session_updated",
+    "_streamed",
+    "_turn_end",
+)
 
 
 class AnonChannel(BaseChannel):
@@ -91,16 +99,18 @@ class AnonChannel(BaseChannel):
 
     def _should_drop_trace_outbound(self, metadata: dict[str, Any]) -> bool:
         """按插件配置丢弃上游 trace 类出站内容."""
-        if metadata.get("_tool_hint"):
-            return not self.config.send_tool_hints
-        if metadata.get("_progress"):
-            return not self.config.send_progress
+        if any(metadata.get(flag) for flag in _BLOCKED_UPSTREAM_CONTROL_FLAGS):
+            return True
         if (
             metadata.get("_reasoning")
             or metadata.get("_reasoning_delta")
             or metadata.get("_reasoning_end")
         ):
             return not self.config.show_reasoning
+        if metadata.get("_tool_hint"):
+            return not self.config.send_tool_hints
+        if metadata.get("_progress"):
+            return not self.config.send_progress
         return False
 
     async def send(self, msg: OutboundMessage) -> None:
