@@ -19,7 +19,7 @@ dependencies = [
     "aiohttp",
     "loguru",
     "mcp",
-    "nanobot-ai>=0.1.5",
+    "nanobot-ai>=0.2.0,<0.3.0",
     "pydantic",
     "pydantic-settings",
 ]

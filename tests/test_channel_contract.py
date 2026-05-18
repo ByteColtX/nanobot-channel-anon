@@ -85,6 +85,10 @@ def test_default_config_remains_onboard_compatible() -> None:
     assert config["accessToken"] == ""
     assert config["allowFrom"] == []
     assert config["superAdmins"] == []
+    assert config["streaming"] is False
+    assert config["sendProgress"] is False
+    assert config["sendToolHints"] is False
+    assert config["showReasoning"] is False
     assert config["maxContextMessages"] == 25
     assert config["maxCtxLength"] == 300
     assert config["mediaMaxSizeMb"] == 50

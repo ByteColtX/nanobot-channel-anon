@@ -27,6 +27,22 @@ class AnonConfig(Base):
         default_factory=list,
         description="超级管理员发送者 ID。",
     )
+    streaming: bool = Field(
+        default=False,
+        description="是否请求上游通过 send_delta 流式返回普通文本。",
+    )
+    send_progress: bool = Field(
+        default=False,
+        description="是否向 QQ 发送上游进度消息。",
+    )
+    send_tool_hints: bool = Field(
+        default=False,
+        description="是否向 QQ 发送上游工具提示消息。",
+    )
+    show_reasoning: bool = Field(
+        default=False,
+        description="是否展示上游模型 reasoning 内容。",
+    )
     private_trigger_prob: float = Field(default=0.85, ge=0.0, le=1.0)
     group_trigger_prob: float = Field(default=0.03, ge=0.0, le=1.0)
     trigger_on_keywords: list[str] = Field(default_factory=list)
@@ -167,4 +183,3 @@ class AnonConfig(Base):
         if self.enabled and not self.ws_url:
             raise ValueError("enabled channel requires a non-empty ws_url")
         return self
-

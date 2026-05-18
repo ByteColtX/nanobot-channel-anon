@@ -49,6 +49,9 @@ class AnonChannel(BaseChannel):
             validated_config = AnonConfig.model_validate(config)
         super().__init__(validated_config, bus)
         self.config: AnonConfig = validated_config
+        self.send_progress = self.config.send_progress
+        self.send_tool_hints = self.config.send_tool_hints
+        self.show_reasoning = self.config.show_reasoning
         if kernel_factory is None:
             self._kernel = self._build_kernel(self.config, bus)
         else:
@@ -86,8 +89,24 @@ class AnonChannel(BaseChannel):
             pattern.match(normalized) for pattern in _BLOCKED_UPSTREAM_OUTBOUND_PATTERNS
         )
 
+    def _should_drop_trace_outbound(self, metadata: dict[str, Any]) -> bool:
+        """按插件配置丢弃上游 trace 类出站内容."""
+        if metadata.get("_tool_hint"):
+            return not self.config.send_tool_hints
+        if metadata.get("_progress"):
+            return not self.config.send_progress
+        if (
+            metadata.get("_reasoning")
+            or metadata.get("_reasoning_delta")
+            or metadata.get("_reasoning_end")
+        ):
+            return not self.config.show_reasoning
+        return False
+
     async def send(self, msg: OutboundMessage) -> None:
         """发送消息并委托给内核."""
+        if self._should_drop_trace_outbound(msg.metadata):
+            return
         if self._should_drop_upstream_outbound(msg.content, has_media=bool(msg.media)):
             return
         await self._kernel.send(msg)

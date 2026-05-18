@@ -1401,6 +1401,32 @@ def test_kernel_treats_known_slash_command_from_non_admin_as_normal_message() ->
     asyncio.run(case())
 
 
+def test_kernel_marks_inbound_when_streaming_is_enabled() -> None:
+    """streaming=true 时应请求上游走 send_delta 返回路径."""
+
+    async def case() -> None:
+        bus = MessageBus()
+        kernel = Kernel(
+            config=_config(
+                streaming=True,
+                trigger_on_at=False,
+                trigger_on_reply=False,
+                group_trigger_prob=1.0,
+            ),
+            bus=bus,
+            transport=RecordingTransport(),
+        )
+
+        await kernel.handle_inbound(_group_message(content="hello stream"))
+
+        inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+        assert inbound.metadata["_wants_stream"] is True
+        assert inbound.metadata["trigger_reason"] == "group_probability"
+
+    asyncio.run(case())
+
+
 def test_kernel_treats_unknown_slash_command_as_normal_message() -> None:
     """未知斜杠命令应按普通消息路径处理并写入上下文."""
 

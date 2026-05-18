@@ -105,6 +105,10 @@ def test_context_and_media_limits_keep_legacy_defaults() -> None:
     """重构后仍应保留可配置的上下文与媒体限制字段."""
     config = AnonConfig.model_validate({})
 
+    assert config.streaming is False
+    assert config.send_progress is False
+    assert config.send_tool_hints is False
+    assert config.show_reasoning is False
     assert config.max_ctx_length == 300
     assert config.max_context_messages == 25
     assert config.media_max_size_mb == 50
@@ -119,6 +123,10 @@ def test_config_accepts_camel_case_keys_from_onboard_json() -> None:
             "superAdmins": ["42"],
             "wsUrl": "ws://127.0.0.1:3001",
             "accessToken": "secret",
+            "streaming": True,
+            "sendProgress": True,
+            "sendToolHints": True,
+            "showReasoning": True,
             "maxContextMessages": 40,
             "maxCtxLength": 512,
             "mediaMaxSizeMb": 64,
@@ -129,6 +137,10 @@ def test_config_accepts_camel_case_keys_from_onboard_json() -> None:
     assert config.super_admins == ["42"]
     assert config.ws_url == "ws://127.0.0.1:3001"
     assert config.access_token == "secret"
+    assert config.streaming is True
+    assert config.send_progress is True
+    assert config.send_tool_hints is True
+    assert config.show_reasoning is True
     assert config.max_context_messages == 40
     assert config.max_ctx_length == 512
     assert config.media_max_size_mb == 64

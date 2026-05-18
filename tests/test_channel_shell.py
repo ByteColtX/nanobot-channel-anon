@@ -225,6 +225,89 @@ def test_channel_shell_allows_normal_text() -> None:
 
 
 
+def test_channel_shell_drops_progress_and_tool_hints_by_default() -> None:
+    """默认不应把上游 trace 消息发送到 QQ."""
+
+    async def case() -> None:
+        kernel = RecordingKernel()
+
+        def kernel_factory(config: AnonConfig, bus: MessageBus) -> RecordingKernel:
+            del config, bus
+            return kernel
+
+        channel = AnonChannel(
+            {"ws_url": "ws://127.0.0.1:3001"},
+            MessageBus(),
+            kernel_factory=kernel_factory,
+        )
+
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content="Thinking...",
+                metadata={"_progress": True},
+            )
+        )
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content='read_file("config.json")',
+                metadata={"_progress": True, "_tool_hint": True},
+            )
+        )
+
+        assert kernel.sent == []
+
+    asyncio.run(case())
+
+
+def test_channel_shell_allows_progress_when_explicitly_enabled() -> None:
+    """显式开启时仍允许发送上游 progress 消息."""
+
+    async def case() -> None:
+        kernel = RecordingKernel()
+
+        def kernel_factory(config: AnonConfig, bus: MessageBus) -> RecordingKernel:
+            del config, bus
+            return kernel
+
+        channel = AnonChannel(
+            {
+                "ws_url": "ws://127.0.0.1:3001",
+                "send_progress": True,
+                "send_tool_hints": True,
+            },
+            MessageBus(),
+            kernel_factory=kernel_factory,
+        )
+
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content="Thinking...",
+                metadata={"_progress": True},
+            )
+        )
+        await channel.send(
+            OutboundMessage(
+                channel="anon",
+                chat_id="private:1",
+                content='read_file("config.json")',
+                metadata={"_progress": True, "_tool_hint": True},
+            )
+        )
+
+        assert [msg.content for msg in kernel.sent] == [
+            "Thinking...",
+            'read_file("config.json")',
+        ]
+
+    asyncio.run(case())
+
+
 def test_channel_shell_allows_error_text_with_media() -> None:
     """带媒体的消息不应仅因文本前缀命中而被丢弃."""
 

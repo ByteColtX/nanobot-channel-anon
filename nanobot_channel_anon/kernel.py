@@ -289,7 +289,7 @@ class Kernel:
                     for item in presented.media
                     if isinstance(item.get("url"), str) and item["url"]
                 ],
-                metadata=metadata,
+                metadata=self._with_streaming_metadata(metadata),
             )
         )
         self.context_store.mark_consumed(message.conversation, message.message_id)
@@ -314,14 +314,22 @@ class Kernel:
                 chat_id=message.conversation.key,
                 content=message.content,
                 media=[],
-                metadata={
-                    "message": message.model_dump(mode="json"),
-                    "trigger_reason": "slash_command",
-                    "ctx_message_ids": [],
-                    "ctx_count": 0,
-                },
+                metadata=self._with_streaming_metadata(
+                    {
+                        "message": message.model_dump(mode="json"),
+                        "trigger_reason": "slash_command",
+                        "ctx_message_ids": [],
+                        "ctx_count": 0,
+                    }
+                ),
             )
         )
+
+    def _with_streaming_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        """按配置补充上游流式响应请求标记."""
+        if not self.config.streaming:
+            return metadata
+        return {**metadata, "_wants_stream": True}
 
     async def remember_message(self, message: NormalizedMessage) -> None:
         """把消息写入上下文与最小状态."""
